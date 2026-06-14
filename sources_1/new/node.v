@@ -217,20 +217,13 @@ module node #(
     reg        selfp;       // 1 = self-packet (suppress fr_done in DISCARD)
     integer    p;
 
-    function [PORT_W-1:0] next_port;
-        input [PORT_W-1:0] port;
-        begin
-            next_port = (port == NUM_PORTS - 1) ? {PORT_W{1'b0}} : port + 1'b1;
+    wire [NUM_PORTS-1:0] ports_except_rp;
+    genvar j;
+    generate
+        for (j = 0; j < NUM_PORTS; j = j + 1) begin : g_pe
+            assign ports_except_rp[j] = (j != rp);
         end
-    endfunction
-
-    function [NUM_PORTS-1:0] ports_except;
-        input [PORT_W-1:0] port;
-        begin
-            ports_except = PORT_MASK;
-            ports_except[port] = 1'b0;
-        end
-    endfunction
+    endgenerate
 
     // Scheduler CRC engine (for TX CRC calculation)
     reg        crc_i, crc_e, crc_f;
@@ -269,14 +262,14 @@ module node #(
                         poll_scan <= 1;
                     end else if (fr_rdy[poll_idx]) begin
                         rp <= poll_idx;
-                        sp <= next_port(poll_idx);
+                        sp <= (poll_idx == NUM_PORTS - 1) ? {PORT_W{1'b0}} : poll_idx + 1'b1;
                         poll_scan <= 0;
                         s <= HDR;
                     end else if (poll_scan == NUM_PORTS) begin
-                        sp <= next_port(sp);
+                        sp <= (sp == NUM_PORTS - 1) ? {PORT_W{1'b0}} : sp + 1'b1;
                         poll_scan <= 0;
                     end else begin
-                        poll_idx <= next_port(poll_idx);
+                        poll_idx <= (poll_idx == NUM_PORTS - 1) ? {PORT_W{1'b0}} : poll_idx + 1'b1;
                         poll_scan <= poll_scan + 1'b1;
                     end
                 end
@@ -297,10 +290,10 @@ module node #(
                     if (fr_dst[rp] == my_id) begin
                         s <= LOCAL;
                     end else if (fr_bc[rp]) begin
-                        fm <= ports_except(rp);
+                        fm <= ports_except_rp;
                         s <= LOCAL;
                     end else begin
-                        fm <= ports_except(rp);
+                        fm <= ports_except_rp;
                         s <= DEDUP;
                     end
                 end

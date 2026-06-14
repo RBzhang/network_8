@@ -16,22 +16,24 @@ module crc32_calc (
 );
     reg [31:0] crc_reg, crc_latched;
 
-    function [31:0] crc32_parallel;
-        input [31:0] c_in; input [31:0] d_in;
-        reg [31:0] c; integer i;
-        begin
-            c = c_in;
-            for (i = 0; i < 32; i = i + 1)
-                c = {c[30:0], 1'b0} ^ ({32{c[31] ^ d_in[31-i]}} & 32'h04C11DB7);
-            crc32_parallel = c;
+    wire [31:0] crc_stage [0:32];
+    assign crc_stage[0] = crc_reg;
+
+    genvar i;
+    generate
+        for (i = 0; i < 32; i = i + 1) begin : crc_bit
+            assign crc_stage[i+1] = {crc_stage[i][30:0], 1'b0}
+                                  ^ ({32{crc_stage[i][31] ^ data[31-i]}} & 32'h04C11DB7);
         end
-    endfunction
+    endgenerate
+
+    wire [31:0] crc_next = crc_stage[32];
 
     always @(posedge clk) begin
         if (rst) begin crc_reg <= 32'hFFFFFFFF; crc_latched <= 0; end
         else begin
             if (init)       crc_reg <= 32'hFFFFFFFF;
-            else if (en)    crc_reg <= crc32_parallel(crc_reg, data);
+            else if (en)    crc_reg <= crc_next;
             if (finalize)   crc_latched <= crc_reg ^ 32'hFFFFFFFF;
         end
     end
