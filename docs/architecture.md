@@ -290,7 +290,7 @@ flowchart LR
 ### 10.6 时钟域
 
 - **帧接收状态机 / 调度器**运行在 160 MHz 主时钟域。
-- **异步 RX/TX FIFO** 完成光模块接口时钟域与 160 MHz 主时钟域之间的跨时钟域转换。
+- **异步 RX/TX FIFO** 由 `sources_1/ip/fifo_generator_32_512/fifo_generator_32_512.xci` 对应的 Vivado FIFO IP 实现，完成光模块接口时钟域与 160 MHz 主时钟域之间的跨时钟域转换。
 - 未来扩展更多光模块时，每新增一个光模块即新增一对异步 FIFO 和一个帧接收状态机。
 
 ## 11. 复位行为

@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 //------------------------------------------------------------------------------
 // NODE: Top-level network node module
-//   Instantiates: sync_fifo, frame_rx, dedup_table, liveness_table, crc32_calc
+//   Instantiates: async_fifo, frame_rx, dedup_table, liveness_table, crc32_calc
 //------------------------------------------------------------------------------
 module node #(
     parameter SYNC_WORD    = 32'hA31E57BD,

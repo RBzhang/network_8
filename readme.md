@@ -29,7 +29,7 @@ sources_1/new/                      自定义核心模块
 | `liveness_table.v` | 基于滑动窗口的节点在线状态表 |
 | `crc32_calc.v` | 帧校验使用的 CRC32 计算模块 |
 | `sync_fifo.v` | 当前工程内使用的同步 FIFO 占位实现 |
-| `async_fifo.v` | 端口时钟域与内部时钟域之间使用的异步 FIFO |
+| `async_fifo.v` | 端口时钟域与内部时钟域之间使用的异步 FIFO 包装器，实际调用 Vivado FIFO IP |
 
 ## 协议摘要
 
@@ -43,7 +43,7 @@ sources_1/new/                      自定义核心模块
 ## 当前状态
 
 - 工程已完成基础 RTL 拆分，适合继续做仿真、时序约束收敛和真实异步 FIFO 替换。
-- `sync_fifo.v` 仍保留为同步 FIFO 占位实现；`node.v` 当前实际接入的是 `async_fifo.v`，用于把端口 `rx_clk/tx_clk` 域和内部 `clk` 域隔离开。
+- `sync_fifo.v` 仍保留为同步 FIFO 占位实现；`node.v` 当前接入的是 `async_fifo.v`，而 `async_fifo.v` 会优先实例化 `sources_1/ip/fifo_generator_32_512/fifo_generator_32_512.xci` 对应的 Vivado FIFO IP，把端口 `rx_clk/tx_clk` 域和内部 `clk` 域隔离开。
 - 文档中的协议与实现保持一致性校对仍值得继续加强，尤其是多端口扩展和背压细节。
 
 ## 使用建议
