@@ -5,7 +5,8 @@
 //   insert=1 adds new entry; when full, oldest entry is overwritten.
 //------------------------------------------------------------------------------
 module dedup_table #(
-    parameter DEPTH = 64
+    parameter DEPTH = 64,
+    parameter PTR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH)
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -20,14 +21,19 @@ module dedup_table #(
     reg [7:0]  smem [0:DEPTH-1];
     reg [15:0] cmem [0:DEPTH-1];
     reg        v    [0:DEPTH-1];
-    reg [$clog2(DEPTH)-1:0] wp;
+    reg [PTR_W-1:0] wp;
+    integer i;
 
     always @(posedge clk) begin
-        if (rst) begin wp <= 0; found <= 0; end
+        if (rst) begin
+            wp <= 0; found <= 0;
+            for (i = 0; i < DEPTH; i = i + 1)
+                v[i] <= 1'b0;
+        end
         else begin
             found <= 0;
             if (lookup) begin
-                for (integer i = 0; i < DEPTH; i = i + 1)
+                for (i = 0; i < DEPTH; i = i + 1)
                     if (v[i] && smem[i] == lkup_src && cmem[i] == lkup_cnt)
                         found <= 1;
             end

@@ -4,7 +4,9 @@
 //------------------------------------------------------------------------------
 module sync_fifo #(
     parameter DEPTH = 512,
-    parameter WIDTH = 32
+    parameter WIDTH = 32,
+    parameter PTR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH),
+    parameter CNT_W = $clog2(DEPTH + 1)
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -14,10 +16,11 @@ module sync_fifo #(
     output wire [WIDTH-1:0] dout,
     output wire        empty,
     output wire        full,
-    output wire [$clog2(DEPTH)-1:0] data_count
+    output wire [CNT_W-1:0] data_count
 );
     reg [WIDTH-1:0] mem [0:DEPTH-1];
-    reg [$clog2(DEPTH)-1:0] wr_ptr, rd_ptr, count;
+    reg [PTR_W-1:0] wr_ptr, rd_ptr;
+    reg [CNT_W-1:0] count;
 
     assign empty      = (count == 0);
     assign full       = (count == DEPTH);
@@ -27,15 +30,25 @@ module sync_fifo #(
     always @(posedge clk) begin
         if (rst) begin wr_ptr <= 0; rd_ptr <= 0; count <= 0; end
         else begin
-            if (wr_en && !full) begin
+            case ({wr_en && !full, rd_en && !empty})
+            2'b10: begin
                 mem[wr_ptr] <= din;
                 wr_ptr <= wr_ptr == DEPTH-1 ? 0 : wr_ptr + 1;
                 count  <= count + 1;
             end
-            if (rd_en && !empty) begin
+            2'b01: begin
                 rd_ptr <= rd_ptr == DEPTH-1 ? 0 : rd_ptr + 1;
                 count  <= count - 1;
             end
+            2'b11: begin
+                mem[wr_ptr] <= din;
+                wr_ptr <= wr_ptr == DEPTH-1 ? 0 : wr_ptr + 1;
+                rd_ptr <= rd_ptr == DEPTH-1 ? 0 : rd_ptr + 1;
+            end
+            default: begin
+                count <= count;
+            end
+            endcase
         end
     end
 

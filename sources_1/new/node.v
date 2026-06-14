@@ -8,7 +8,9 @@ module node #(
     parameter BROADCAST    = 8'hFF,
     parameter MAX_PAYLOAD  = 256,
     parameter LIVENESS_WIN = 5,
+    parameter NODE_COUNT   = 255,
     parameter DEDUP_DEPTH  = 64,
+    parameter FIFO_DEPTH   = 512,
     parameter CLK_FREQ_HZ  = 160_000_000,
     parameter NUM_PORTS    = 2
 ) (
@@ -27,30 +29,36 @@ module node #(
     output wire [7:0]  liveness_node,
     output wire        liveness_alive
 );
+    localparam PORT_W = (NUM_PORTS <= 1) ? 1 : $clog2(NUM_PORTS);
+    localparam SCAN_W = $clog2(NUM_PORTS + 1);
+    localparam [NUM_PORTS-1:0] PORT_MASK = {NUM_PORTS{1'b1}};
+
     reg [7:0] my_id;
     always @(posedge clk) begin
-        if (rst) my_id <= 0;
-        else     my_id <= node_id;
+        if (rst) my_id <= node_id;
+        else     my_id <= my_id;
     end
 
     //----------------------------------------------------------------------
     // Async RX/TX FIFOs (placeholder synchronous FIFOs)
     //----------------------------------------------------------------------
-    wire [0:1] rx_e, rx_f, tx_e, tx_f;
-    wire [31:0] rx_d [0:1], tx_d [0:1], tx_din [0:1];
-    wire [0:1] rx_rd, tx_wr;
+    wire [NUM_PORTS-1:0] rx_e, rx_f, tx_e, tx_f;
+    wire [31:0] rx_d [0:NUM_PORTS-1], tx_d [0:NUM_PORTS-1];
+    reg  [31:0] tx_din [0:NUM_PORTS-1];
+    wire [NUM_PORTS-1:0] rx_rd;
+    reg  [NUM_PORTS-1:0] tx_wr;
 
     genvar g;
     generate
         for (g = 0; g < NUM_PORTS; g = g + 1) begin : g_fifo
-            sync_fifo #(.DEPTH(512)) u_rx (
+            sync_fifo #(.DEPTH(FIFO_DEPTH)) u_rx (
                 .clk(clk), .rst(rst),
-                .wr_en(g ? valid_in1 : valid_in0),
-                .din(g ? in1 : in0),
+                .wr_en((g == 0) ? valid_in0 : ((g == 1) ? valid_in1 : 1'b0)),
+                .din((g == 0) ? in0 : ((g == 1) ? in1 : 32'd0)),
                 .rd_en(rx_rd[g]), .dout(rx_d[g]),
                 .empty(rx_e[g]), .full(rx_f[g])
             );
-            sync_fifo #(.DEPTH(512)) u_tx (
+            sync_fifo #(.DEPTH(FIFO_DEPTH)) u_tx (
                 .clk(clk), .rst(rst),
                 .wr_en(tx_wr[g]), .din(tx_din[g]),
                 .rd_en(!tx_e[g]), .dout(tx_d[g]),
@@ -76,13 +84,13 @@ module node #(
     //----------------------------------------------------------------------
     // Frame Receivers × 2
     //----------------------------------------------------------------------
-    wire [0:1] fr_rdy;
-    wire [7:0]  fr_src [0:1], fr_dst [0:1];
-    wire [15:0] fr_cnt [0:1], fr_len [0:1];
-    wire [31:0] fr_pld [0:1];
-    wire [0:1] fr_bc;
-    reg  [0:1] fr_done;
-    reg  [15:0] fr_paddr [0:1];
+    wire [NUM_PORTS-1:0] fr_rdy;
+    wire [7:0]  fr_src [0:NUM_PORTS-1], fr_dst [0:NUM_PORTS-1];
+    wire [15:0] fr_cnt [0:NUM_PORTS-1], fr_len [0:NUM_PORTS-1];
+    wire [31:0] fr_pld [0:NUM_PORTS-1];
+    wire [NUM_PORTS-1:0] fr_bc;
+    reg  [NUM_PORTS-1:0] fr_done;
+    reg  [15:0] fr_paddr [0:NUM_PORTS-1];
 
     generate
         for (g = 0; g < NUM_PORTS; g = g + 1) begin : g_fr
@@ -127,7 +135,7 @@ module node #(
     reg        lv_upd;
     reg [7:0]  lv_s;
 
-    liveness_table #(.MAX_NODES(255), .WINDOW(LIVENESS_WIN)) u_lv (
+    liveness_table #(.MAX_NODES(NODE_COUNT), .WINDOW(LIVENESS_WIN)) u_lv (
         .clk(clk), .rst(rst),
         .tick_1s(t1s), .update(lv_upd), .update_src(lv_s),
         .upload_valid(liveness_valid), .upload_node(liveness_node),
@@ -156,30 +164,51 @@ module node #(
     //----------------------------------------------------------------------
     // Scheduler: unified frame processor
     //----------------------------------------------------------------------
-    localparam [3:0] IDLE      = 4'd0;
-    localparam [3:0] POLL      = 4'd1;
-    localparam [3:0] HDR       = 4'd2;
-    localparam [3:0] SELFCHK   = 4'd3;
-    localparam [3:0] DSTCHK    = 4'd4;
-    localparam [3:0] DEDUP     = 4'd5;
-    localparam [3:0] LOCAL     = 4'd6;
-    localparam [3:0] FWDSET    = 4'd7;
-    localparam [3:0] FWDSYNC   = 4'd8;
-    localparam [3:0] FWDDATA   = 4'd9;
-    localparam [3:0] FWDCRC    = 4'd10;
-    localparam [3:0] DISCARD   = 4'd11;
-    localparam [3:0] SELFSET   = 4'd12;
-    localparam [3:0] SELFDATA  = 4'd13;
-    localparam [3:0] SELFCRC   = 4'd14;
-    localparam [3:0] SELFDONE  = 4'd15;
+    localparam [4:0] IDLE         = 5'd0;
+    localparam [4:0] POLL         = 5'd1;
+    localparam [4:0] HDR          = 5'd2;
+    localparam [4:0] SELFCHK      = 5'd3;
+    localparam [4:0] DSTCHK       = 5'd4;
+    localparam [4:0] DEDUP        = 5'd5;
+    localparam [4:0] LOCAL        = 5'd6;
+    localparam [4:0] FWDSET       = 5'd7;
+    localparam [4:0] FWDSYNC      = 5'd8;
+    localparam [4:0] FWDDATA      = 5'd9;
+    localparam [4:0] FWDCRC       = 5'd10;
+    localparam [4:0] DISCARD      = 5'd11;
+    localparam [4:0] SELFSET      = 5'd12;
+    localparam [4:0] SELFDATA     = 5'd13;
+    localparam [4:0] SELFCRC      = 5'd14;
+    localparam [4:0] SELFDONE     = 5'd15;
+    localparam [4:0] DEDUP_WAIT   = 5'd16;
+    localparam [4:0] FWDCRC_WAIT  = 5'd17;
+    localparam [4:0] SELFCRC_WAIT = 5'd18;
 
-    reg [3:0]  s;           // current state
-    reg        sp;          // round-robin poll index
-    reg [0:0]  rp;          // active RX port
+    reg [4:0]  s;           // current state
+    reg [PORT_W-1:0] sp;    // round-robin poll index
+    reg [PORT_W-1:0] rp;    // active RX port
+    reg [PORT_W-1:0] poll_idx;
+    reg [SCAN_W-1:0] poll_scan;
     reg [15:0] si;          // word index within frame
     reg [15:0] sl;          // len16 of current frame
-    reg [1:0]  fm;          // forward port bitmask
+    reg [NUM_PORTS-1:0] fm; // forward port bitmask
     reg        selfp;       // 1 = self-packet (suppress fr_done in DISCARD)
+    integer    p;
+
+    function [PORT_W-1:0] next_port;
+        input [PORT_W-1:0] port;
+        begin
+            next_port = (port == NUM_PORTS - 1) ? {PORT_W{1'b0}} : port + 1'b1;
+        end
+    endfunction
+
+    function [NUM_PORTS-1:0] ports_except;
+        input [PORT_W-1:0] port;
+        begin
+            ports_except = PORT_MASK;
+            ports_except[port] = 1'b0;
+        end
+    endfunction
 
     // Scheduler CRC engine (for TX CRC calculation)
     reg        crc_i, crc_e, crc_f;
@@ -193,26 +222,41 @@ module node #(
 
     always @(posedge clk) begin
         if (rst) begin
-            s <= IDLE; sp <= 0; rp <= 0; si <= 0; sl <= 0; fm <= 0;
+            s <= IDLE; sp <= 0; rp <= 0; poll_idx <= 0; poll_scan <= 0; si <= 0; sl <= 0; fm <= 0;
             selfp <= 0;
-            fr_done <= '{0, 0}; tx_wr <= '{0, 0}; tx_din <= '{0, 0};
+            fr_done <= {NUM_PORTS{1'b0}}; tx_wr <= {NUM_PORTS{1'b0}};
+            for (p = 0; p < NUM_PORTS; p = p + 1)
+                tx_din[p] <= 32'd0;
             d_lkup <= 0; d_ins <= 0; d_src <= 0; d_cnt <= 0;
             lv_upd <= 0; lv_s <= 0;
             crc_i <= 0; crc_e <= 0; crc_f <= 0; crc_d <= 0;
         end else begin
-            fr_done <= '{0, 0}; tx_wr <= '{0, 0};
+            fr_done <= {NUM_PORTS{1'b0}}; tx_wr <= {NUM_PORTS{1'b0}};
             d_lkup <= 0; d_ins <= 0; lv_upd <= 0;
             crc_i <= 0; crc_e <= 0; crc_f <= 0;
 
             case (s)
 
-                IDLE: begin sp <= 0; s <= POLL; end
+                IDLE: begin s <= POLL; end
 
                 POLL: begin
-                    if (self_tr)                     s <= SELFSET;
-                    else if (fr_rdy[sp])  begin rp <= sp;  s <= HDR; end
-                    else if (fr_rdy[!sp]) begin rp <= !sp; s <= HDR; end
-                    else                  sp <= !sp;
+                    if (self_tr) begin
+                        s <= SELFSET;
+                    end else if (poll_scan == 0) begin
+                        poll_idx <= sp;
+                        poll_scan <= 1;
+                    end else if (fr_rdy[poll_idx]) begin
+                        rp <= poll_idx;
+                        sp <= next_port(poll_idx);
+                        poll_scan <= 0;
+                        s <= HDR;
+                    end else if (poll_scan == NUM_PORTS) begin
+                        sp <= next_port(sp);
+                        poll_scan <= 0;
+                    end else begin
+                        poll_idx <= next_port(poll_idx);
+                        poll_scan <= poll_scan + 1'b1;
+                    end
                 end
 
                 HDR: begin sl <= fr_len[rp]; si <= 0; s <= SELFCHK; end
@@ -231,10 +275,10 @@ module node #(
                     if (fr_dst[rp] == my_id) begin
                         s <= LOCAL;
                     end else if (fr_bc[rp]) begin
-                        fm <= (~(1 << rp)) & ((1 << NUM_PORTS) - 1);
+                        fm <= ports_except(rp);
                         s <= LOCAL;
                     end else begin
-                        fm <= (~(1 << rp)) & ((1 << NUM_PORTS) - 1);
+                        fm <= ports_except(rp);
                         s <= DEDUP;
                     end
                 end
@@ -246,7 +290,11 @@ module node #(
 
                 DEDUP: begin
                     d_src <= fr_src[rp]; d_cnt <= fr_cnt[rp];
-                    d_lkup <= 1; s <= FWDSET;
+                    d_lkup <= 1; s <= DEDUP_WAIT;
+                end
+
+                DEDUP_WAIT: begin
+                    s <= FWDSET;
                 end
 
                 FWDSET: begin
@@ -258,95 +306,109 @@ module node #(
 
                 // Write sync word to all forward ports
                 FWDSYNC: begin
-                    for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                        if (fm[p] && !tx_f[p]) begin
-                            tx_din[p] <= SYNC_WORD; tx_wr[p] <= 1;
-                        end
-                    si <= 1; s <= FWDDATA;
+                    if ((fm & tx_f) == {NUM_PORTS{1'b0}}) begin
+                        for (p = 0; p < NUM_PORTS; p = p + 1)
+                            if (fm[p]) begin
+                                tx_din[p] <= SYNC_WORD; tx_wr[p] <= 1;
+                            end
+                        si <= 1; s <= FWDDATA;
+                    end
                 end
 
                 // Write header + payload words, compute CRC
                 FWDDATA: begin
-                    if (si == 1) begin
-                        for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                            if (fm[p] && !tx_f[p]) begin
-                                tx_din[p] <= {fr_src[rp], fr_dst[rp], fr_cnt[rp]};
-                                tx_wr[p]  <= 1;
+                    if ((fm & tx_f) == {NUM_PORTS{1'b0}}) begin
+                        if (si == 1) begin
+                            for (p = 0; p < NUM_PORTS; p = p + 1)
+                                if (fm[p]) begin
+                                    tx_din[p] <= {fr_src[rp], fr_dst[rp], fr_cnt[rp]};
+                                    tx_wr[p]  <= 1;
+                                end
+                            crc_e <= 1; crc_d <= {fr_src[rp], fr_dst[rp], fr_cnt[rp]};
+                            si <= 2; s <= FWDDATA;
+                        end else if (si == 2) begin
+                            for (p = 0; p < NUM_PORTS; p = p + 1)
+                                if (fm[p]) begin
+                                    tx_din[p] <= {sl, 16'd0}; tx_wr[p] <= 1;
+                                end
+                            crc_e <= 1; crc_d <= {sl, 16'd0};
+                            if (sl > 0) begin fr_paddr[rp] <= 0; si <= 3; end
+                            else        begin s <= FWDCRC; end
+                        end else if (si >= 3 && si < (3 + sl)) begin
+                            for (p = 0; p < NUM_PORTS; p = p + 1)
+                                if (fm[p]) begin
+                                    tx_din[p] <= fr_pld[rp]; tx_wr[p] <= 1;
+                                end
+                            crc_e <= 1; crc_d <= fr_pld[rp];
+                            if (si == 3 + sl - 1) begin s <= FWDCRC; end
+                            else begin
+                                fr_paddr[rp] <= si - 3 + 1; si <= si + 1;
                             end
-                        crc_e <= 1; crc_d <= {fr_src[rp], fr_dst[rp], fr_cnt[rp]};
-                        si <= 2; s <= FWDDATA;
-                    end else if (si == 2) begin
-                        for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                            if (fm[p] && !tx_f[p]) begin
-                                tx_din[p] <= {sl, 16'd0}; tx_wr[p] <= 1;
-                            end
-                        crc_e <= 1; crc_d <= {sl, 16'd0};
-                        if (sl > 0) begin fr_paddr[rp] <= 0; si <= 3; end
-                        else        begin s <= FWDCRC; end
-                    end else if (si >= 3 && si < (3 + sl)) begin
-                        for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                            if (fm[p] && !tx_f[p]) begin
-                                tx_din[p] <= fr_pld[rp]; tx_wr[p] <= 1;
-                            end
-                        crc_e <= 1; crc_d <= fr_pld[rp];
-                        if (si == 3 + sl - 1) begin s <= FWDCRC; end
-                        else begin
-                            fr_paddr[rp] <= si - 3 + 1; si <= si + 1;
                         end
                     end
                 end
 
                 // Finalize CRC
-                FWDCRC: begin crc_f <= 1; s <= DISCARD; end
+                FWDCRC: begin crc_f <= 1; s <= FWDCRC_WAIT; end
+
+                FWDCRC_WAIT: begin s <= DISCARD; end
 
                 // Write CRC word, release frame receiver
                 DISCARD: begin
-                    for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                        if (fm[p] && !tx_f[p]) begin
-                            tx_din[p] <= crc_r; tx_wr[p] <= 1;
-                        end
-                    if (!selfp) fr_done[rp] <= 1;
-                    selfp <= 0; s <= IDLE;
+                    if ((fm & tx_f) == {NUM_PORTS{1'b0}}) begin
+                        for (p = 0; p < NUM_PORTS; p = p + 1)
+                            if (fm[p]) begin
+                                tx_din[p] <= crc_r; tx_wr[p] <= 1;
+                            end
+                        if (!selfp) fr_done[rp] <= 1;
+                        selfp <= 0; s <= IDLE;
+                    end
                 end
 
                 // ---- Self-packet transmission ----
                 SELFSET: begin
                     crc_i <= 1; si <= 0; selfp <= 1;
-                    fm <= (1 << NUM_PORTS) - 1; s <= SELFDATA;
+                    fm <= PORT_MASK; s <= SELFDATA;
                 end
 
                 SELFDATA: begin
-                    if (si == 0) begin
-                        for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                            if (!tx_f[p]) begin
-                                tx_din[p] <= SYNC_WORD; tx_wr[p] <= 1;
-                            end
-                        si <= 1; s <= SELFDATA;
-                    end else if (si == 1) begin
-                        for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                            if (!tx_f[p]) begin
-                                tx_din[p] <= {my_id, BROADCAST, self_c}; tx_wr[p] <= 1;
-                            end
-                        crc_e <= 1; crc_d <= {my_id, BROADCAST, self_c};
-                        si <= 2; s <= SELFDATA;
-                    end else if (si == 2) begin
-                        for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                            if (!tx_f[p]) begin
-                                tx_din[p] <= 0; tx_wr[p] <= 1;
-                            end
-                        crc_e <= 1; crc_d <= 0;
-                        s <= SELFCRC;
+                    if ((fm & tx_f) == {NUM_PORTS{1'b0}}) begin
+                        if (si == 0) begin
+                            for (p = 0; p < NUM_PORTS; p = p + 1)
+                                if (fm[p]) begin
+                                    tx_din[p] <= SYNC_WORD; tx_wr[p] <= 1;
+                                end
+                            si <= 1; s <= SELFDATA;
+                        end else if (si == 1) begin
+                            for (p = 0; p < NUM_PORTS; p = p + 1)
+                                if (fm[p]) begin
+                                    tx_din[p] <= {my_id, BROADCAST, self_c}; tx_wr[p] <= 1;
+                                end
+                            crc_e <= 1; crc_d <= {my_id, BROADCAST, self_c};
+                            si <= 2; s <= SELFDATA;
+                        end else if (si == 2) begin
+                            for (p = 0; p < NUM_PORTS; p = p + 1)
+                                if (fm[p]) begin
+                                    tx_din[p] <= 0; tx_wr[p] <= 1;
+                                end
+                            crc_e <= 1; crc_d <= 0;
+                            s <= SELFCRC;
+                        end
                     end
                 end
 
-                SELFCRC: begin crc_f <= 1; s <= SELFDONE; end
+                SELFCRC: begin crc_f <= 1; s <= SELFCRC_WAIT; end
+
+                SELFCRC_WAIT: begin s <= SELFDONE; end
 
                 SELFDONE: begin
-                    for (integer p = 0; p < NUM_PORTS; p = p + 1)
-                        if (!tx_f[p]) begin
-                            tx_din[p] <= crc_r; tx_wr[p] <= 1;
-                        end
-                    selfp <= 0; s <= IDLE;
+                    if ((fm & tx_f) == {NUM_PORTS{1'b0}}) begin
+                        for (p = 0; p < NUM_PORTS; p = p + 1)
+                            if (fm[p]) begin
+                                tx_din[p] <= crc_r; tx_wr[p] <= 1;
+                            end
+                        selfp <= 0; s <= IDLE;
+                    end
                 end
 
                 default: s <= IDLE;

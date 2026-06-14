@@ -25,11 +25,12 @@ module frame_rx #(
     output reg         rx_is_broadcast,
     input  wire        frame_consumed
 );
-    localparam [2:0] HUNT = 0, HEADER1 = 1, HEADER2 = 2, PAYLOAD = 3, CRC = 4, DONE = 5;
+    localparam [2:0] HUNT = 0, HEADER1 = 1, HEADER2 = 2, PAYLOAD = 3,
+                     CRC = 4, CHECK = 5, DONE = 6;
 
     reg [2:0]  st;
     reg [15:0] wi, tlen;
-    reg [31:0] buf [0:MAX_PAYLOAD-1];
+    reg [31:0] buff [0:MAX_PAYLOAD-1];
     reg [7:0]  sid, did;
     reg [15:0] cnt;
     reg [15:0] plen;
@@ -44,8 +45,8 @@ module frame_rx #(
         .finalize(crc_final), .crc_out(crc_res)
     );
 
-    assign fifo_rd_en = (st != DONE);
-    assign rx_payload = (st == DONE && frame_ready) ? buf[payload_addr] : 32'd0;
+    assign fifo_rd_en = (st != CHECK && st != DONE);
+    assign rx_payload = (st == DONE && frame_ready) ? buff[payload_addr] : 32'd0;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -55,9 +56,7 @@ module frame_rx #(
             crc_init <= 0; crc_en <= 0; crc_final <= 0;
             if (frame_ready && frame_consumed) begin
                 frame_ready <= 0; st <= HUNT; wi <= 0;
-            end
-
-            case (st)
+            end else case (st)
                 HUNT: begin
                     if (!fifo_empty && fifo_dout == SYNC_WORD) begin
                         st <= HEADER1; crc_init <= 1;
@@ -90,7 +89,7 @@ module frame_rx #(
 
                 PAYLOAD: begin
                     if (!fifo_empty) begin
-                        buf[wi] <= fifo_dout;
+                        buff[wi] <= fifo_dout;
                         crc_en <= 1; crc_din <= fifo_dout;
                         if (wi == tlen - 1) st <= CRC;
                         else                wi <= wi + 1;
@@ -101,19 +100,24 @@ module frame_rx #(
                     if (!fifo_empty) begin
                         crc_rcv <= fifo_dout;
                         crc_final <= 1;
-                        st <= DONE;
+                        st <= CHECK;
                     end
                 end
 
-                DONE: begin
+                CHECK: begin
                     if (crc_res == crc_rcv) begin
                         rx_src_id <= sid; rx_dst_id <= did;
                         rx_count <= cnt; rx_len16 <= plen;
                         rx_is_broadcast <= (did == 8'hFF);
                         frame_ready <= 1;
+                        st <= DONE;
                     end else begin
                         st <= HUNT;
                     end
+                end
+
+                DONE: begin
+                    st <= DONE;
                 end
 
                 default: st <= HUNT;

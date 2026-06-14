@@ -7,7 +7,8 @@
 //------------------------------------------------------------------------------
 module liveness_table #(
     parameter MAX_NODES = 255,
-    parameter WINDOW    = 5
+    parameter WINDOW    = 5,
+    parameter NODE_W    = (MAX_NODES <= 1) ? 1 : $clog2(MAX_NODES)
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -19,13 +20,16 @@ module liveness_table #(
     output reg         upload_alive
 );
     reg [WINDOW-1:0] w [0:MAX_NODES-1];
-    reg [7:0] idx;
+    reg [NODE_W-1:0] idx;
     reg       up;
+    integer i;
 
     always @(posedge clk) begin
         if (rst) begin
             up <= 0; idx <= 0;
             upload_valid <= 0; upload_node <= 0; upload_alive <= 0;
+            for (i = 0; i < MAX_NODES; i = i + 1)
+                w[i] <= {WINDOW{1'b0}};
         end else begin
             if (tick_1s) begin
                 up  <= 1;
@@ -33,7 +37,7 @@ module liveness_table #(
                 upload_valid <= 1;
                 upload_node  <= 0;
                 upload_alive <= |w[0];
-                for (integer i = 0; i < MAX_NODES; i = i + 1)
+                for (i = 0; i < MAX_NODES; i = i + 1)
                     w[i] <= {w[i][WINDOW-2:0], 1'b0};
             end
 
