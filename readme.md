@@ -28,7 +28,8 @@ sources_1/new/                      自定义核心模块
 | `dedup_table.v` | 基于 FIFO 老化的去重表，抑制环网重复包 |
 | `liveness_table.v` | 基于滑动窗口的节点在线状态表 |
 | `crc32_calc.v` | 帧校验使用的 CRC32 计算模块 |
-| `sync_fifo.v` | 当前工程内使用的 FIFO 占位实现 |
+| `sync_fifo.v` | 当前工程内使用的同步 FIFO 占位实现 |
+| `async_fifo.v` | 端口时钟域与内部时钟域之间使用的异步 FIFO |
 
 ## 协议摘要
 
@@ -42,7 +43,7 @@ sources_1/new/                      自定义核心模块
 ## 当前状态
 
 - 工程已完成基础 RTL 拆分，适合继续做仿真、时序约束收敛和真实异步 FIFO 替换。
-- `sync_fifo.v` 目前是占位式同步 FIFO，若接入真实 GT/SerDes 时钟域，需要替换为跨时钟域异步 FIFO 实现。
+- `sync_fifo.v` 仍保留为同步 FIFO 占位实现；`node.v` 当前实际接入的是 `async_fifo.v`，用于把端口 `rx_clk/tx_clk` 域和内部 `clk` 域隔离开。
 - 文档中的协议与实现保持一致性校对仍值得继续加强，尤其是多端口扩展和背压细节。
 
 ## 使用建议

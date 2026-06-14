@@ -17,6 +17,10 @@ module node #(
     input  wire        clk,
     input  wire        rst,
     input  wire [7:0]  node_id,
+    input  wire        rx_clk0,
+    input  wire        rx_clk1,
+    input  wire        tx_clk0,
+    input  wire        tx_clk1,
     input  wire [31:0] in0,
     input  wire [31:0] in1,
     input  wire        valid_in0,
@@ -40,7 +44,7 @@ module node #(
     end
 
     //----------------------------------------------------------------------
-    // Async RX/TX FIFOs (placeholder synchronous FIFOs)
+    // Async RX/TX FIFOs bridge per-port clocks to the internal clk domain.
     //----------------------------------------------------------------------
     wire [NUM_PORTS-1:0] rx_e, rx_f, tx_e, tx_f;
     wire [31:0] rx_d [0:NUM_PORTS-1], tx_d [0:NUM_PORTS-1];
@@ -51,32 +55,50 @@ module node #(
     genvar g;
     generate
         for (g = 0; g < NUM_PORTS; g = g + 1) begin : g_fifo
-            sync_fifo #(.DEPTH(FIFO_DEPTH)) u_rx (
-                .clk(clk), .rst(rst),
-                .wr_en((g == 0) ? valid_in0 : ((g == 1) ? valid_in1 : 1'b0)),
-                .din((g == 0) ? in0 : ((g == 1) ? in1 : 32'd0)),
-                .rd_en(rx_rd[g]), .dout(rx_d[g]),
-                .empty(rx_e[g]), .full(rx_f[g])
-            );
-            sync_fifo #(.DEPTH(FIFO_DEPTH)) u_tx (
-                .clk(clk), .rst(rst),
-                .wr_en(tx_wr[g]), .din(tx_din[g]),
-                .rd_en(!tx_e[g]), .dout(tx_d[g]),
-                .empty(tx_e[g]), .full(tx_f[g])
-            );
+            if (g == 0) begin : g_port0
+                async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx (
+                    .wr_clk(rx_clk0), .rst(rst),
+                    .wr_en(valid_in0), .din(in0),
+                    .full(rx_f[g]),
+                    .rd_clk(clk), .rd_en(rx_rd[g]), .dout(rx_d[g]),
+                    .empty(rx_e[g])
+                );
+                async_fifo #(.DEPTH(FIFO_DEPTH)) u_tx (
+                    .wr_clk(clk), .rst(rst),
+                    .wr_en(tx_wr[g]), .din(tx_din[g]),
+                    .full(tx_f[g]),
+                    .rd_clk(tx_clk0), .rd_en(!tx_e[g]), .dout(tx_d[g]),
+                    .empty(tx_e[g])
+                );
+            end else begin : g_port1
+                async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx (
+                    .wr_clk(rx_clk1), .rst(rst),
+                    .wr_en(valid_in1), .din(in1),
+                    .full(rx_f[g]),
+                    .rd_clk(clk), .rd_en(rx_rd[g]), .dout(rx_d[g]),
+                    .empty(rx_e[g])
+                );
+                async_fifo #(.DEPTH(FIFO_DEPTH)) u_tx (
+                    .wr_clk(clk), .rst(rst),
+                    .wr_en(tx_wr[g]), .din(tx_din[g]),
+                    .full(tx_f[g]),
+                    .rd_clk(tx_clk1), .rd_en(!tx_e[g]), .dout(tx_d[g]),
+                    .empty(tx_e[g])
+                );
+            end
         end
     endgenerate
 
     // TX output: continuous read from TX FIFO when not empty
     reg [31:0] o0, o1;
     reg        v0, v1;
-    always @(posedge clk) begin
-        if (rst) begin o0 <= 0; o1 <= 0; v0 <= 0; v1 <= 0; end
-        else begin
-            v0 <= !tx_e[0]; v1 <= !tx_e[1];
-            if (!tx_e[0]) o0 <= tx_d[0];
-            if (!tx_e[1]) o1 <= tx_d[1];
-        end
+    always @(posedge tx_clk0) begin
+        if (rst) begin o0 <= 0; v0 <= 0; end
+        else begin v0 <= !tx_e[0]; if (!tx_e[0]) o0 <= tx_d[0]; end
+    end
+    always @(posedge tx_clk1) begin
+        if (rst) begin o1 <= 0; v1 <= 0; end
+        else begin v1 <= !tx_e[1]; if (!tx_e[1]) o1 <= tx_d[1]; end
     end
     assign out0 = o0;   assign out1 = o1;
     assign valid_out0 = v0;   assign valid_out1 = v1;
