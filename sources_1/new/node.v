@@ -212,13 +212,28 @@ module node #(
     // Local-packet trigger: data frames have priority; liveness frame fires every 1 second.
     reg [15:0] local_count = 0;
     reg        self_tr = 0;
+
+    reg self_pending = 0;
+
     always @(posedge clk) begin
-        if (rst || !id_locked) self_tr <= 0;
-        else begin
-            self_tr <= 0;
-            if (t1s) self_tr <= 1;
+        if (rst || !id_locked) begin
+            self_pending <= 1'b0;
+        end else begin
+            if (t1s)
+                self_pending <= 1'b1;
+
+            if (s == SELFSET && local_dst == BROADCAST && local_len == 0)
+                self_pending <= 1'b0;
         end
     end
+    // always @(posedge clk) begin
+    //     if (rst || !id_locked) self_tr <= 0;
+    //     else begin
+    //         // self_tr <= 0;
+    //         if (t1s) self_tr <= 1;
+
+    //     end
+    // end
 
     //----------------------------------------------------------------------
     // Scheduler: unified frame processor
@@ -312,7 +327,7 @@ module node #(
                         local_count <= local_count + 1'b1;
                         app_frame_accepted <= 1'b1;
                         s <= SELFSET;
-                    end else if (self_tr) begin
+                    end else if (self_pending) begin
                         local_dst <= BROADCAST;
                         local_len <= 16'd0;
                         local_frame_count <= local_count;
