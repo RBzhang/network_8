@@ -39,28 +39,32 @@ module liveness_table #(
             up <= 0; idx <= 0;
             upload_valid <= 0; upload_node <= 0; upload_alive <= 0;
         end else begin
+
+            if (update)
+                w[update_src][0] = 1;
+
             if (tick_1s) begin
                 up  <= 1;
                 idx <= 0;
-                upload_valid <= 1;
+                upload_valid <= 0;
                 upload_node  <= 0;
-                upload_alive <= |w[0];
+                upload_alive <= upload_alive;
                 for (i = 0; i < MAX_NODES; i = i + 1)
                     w[i] <= {w[i][WINDOW-2:0], 1'b0};
             end
 
-            if (update)
-                w[update_src][0] <= 1;
 
             if (up) begin
-                upload_valid <= 1;
                 upload_node  <= idx;
                 upload_alive <= |w[idx];
                 if (idx == MAX_NODES - 1) begin
                     up <= 0;
+                    idx <= 0;
                     upload_valid <= 0;
                 end else begin
+                    up <= 1'b1;
                     idx <= idx + 1;
+                    upload_valid <= 1;
                 end
             end
         end
