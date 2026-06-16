@@ -13,7 +13,7 @@ module frame_tx #(
     input  wire [7:0]  dst_id,
     input  wire [15:0] count,
     input  wire [15:0] len16,
-    output reg  [15:0] payload_addr,
+    output reg  [15:0] payload_index,
     input  wire [31:0] payload_data,
     input  wire        tx_full,
     output reg         tx_wr_en,
@@ -35,7 +35,6 @@ module frame_tx #(
     reg [7:0]  dst_r;
     reg [15:0] count_r;
     reg [15:0] len_r;
-    reg [15:0] payload_index;
     reg        crc_init;
     reg        crc_en;
     reg        crc_finalize;
@@ -60,7 +59,6 @@ module frame_tx #(
             count_r <= 16'd0;
             len_r <= 16'd0;
             payload_index <= 16'd0;
-            payload_addr <= 16'd0;
             tx_wr_en <= 1'b0;
             tx_din <= 32'd0;
             busy <= 1'b0;
@@ -85,7 +83,6 @@ module frame_tx #(
                         count_r <= count;
                         len_r <= len16;
                         payload_index <= 16'd0;
-                        payload_addr <= 16'd0;
                         crc_init <= 1'b1;
                         busy <= 1'b1;
                         st <= S_SYNC;
@@ -133,7 +130,6 @@ module frame_tx #(
                             st <= S_CRC;
                         end else begin
                             payload_index <= payload_index + 1'b1;
-                            payload_addr <= payload_index + 1'b1;
                         end
                     end
                 end

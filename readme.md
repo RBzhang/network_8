@@ -76,6 +76,7 @@ node.v (兼容性封装，仅实例化 node_top)
 
 - 将 `id_locked` 信号通过两级同步器传递到各 RX 时钟域，作为 RX FIFO 写使能的门控
 - 每端口实例化一对 `async_fifo`（RX + TX）
+- 将 TX FIFO 写时钟域的 `wr_data_count` 汇总给发送仲裁器，用于整帧空间预检查
 - TX 侧持续监测 FIFO 非空，在端口自己的 `tx_clk*` 域输出 `out*` 和 `valid_out*`
 
 ### `frame_rx.v` — 帧接收器
@@ -118,9 +119,10 @@ node.v (兼容性封装，仅实例化 node_top)
 仲裁本地包（来自 `local_packet_generator`）和转发包（来自 `forward_engine`）：
 
 - 转发包优先级高于本地包
-- 当所有目标端口 `tx_busy` 均为 0 时，启动所有目标端口的 `frame_tx`
+- 当所有目标端口 `tx_busy` 均为 0 时，先按 `4 + len16` 计算整帧 word 数，再用目标 TX FIFO 的 `wr_data_count` 检查是否有足够空间
+- 如果任一目标端口空间不足或 `full=1`，该待发帧直接丢弃，不启动 `frame_tx`，避免 TX FIFO 中出现半帧
 - 本地包向所有端口广播；转发包向非接收端口发送
-- 3 状态 FSM: `IDLE → BUSY → WAIT_DROP`
+- 4 状态 FSM: `IDLE → BUSY → WAIT_FWD_ACK / WAIT_LOCAL_ACK`
 
 ### `frame_tx.v` — 帧发送器
 
@@ -128,6 +130,7 @@ node.v (兼容性封装，仅实例化 node_top)
 
 - 写入同步头 → Header1 `{src, dst, count}` → Header2 `{len16, 0}` → Payload → CRC32
 - 每写入一个 word 同时送入 CRC32 计算引擎
+- payload 读取使用内部 `payload_index`，它只是本地 buffer/RAM 索引，不是协议帧字段
 - 内部实例化 `crc32_calc` 用于在线 CRC 计算
 - 7 状态 FSM: `IDLE → SYNC → HEADER1 → HEADER2 → PAYLOAD → CRC → CRC_WAIT → DONE`
 
@@ -171,6 +174,7 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
 
 - `USE_IP=1`（默认）: 实例化 Vivado `fifo_generator_32_512` IP 核
 - `USE_IP=0`（仿真）: 纯 RTL 行为模型（双口 RAM + 格雷码指针 + 两级同步器）
+- 导出写时钟域 `wr_data_count`，供发送仲裁器在启动整帧写入前判断剩余空间
 
 ### `sync_fifo.v` — 同步 FIFO
 
@@ -195,6 +199,7 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
 - 拓扑：双端口环形互联，节点自发包向两个方向扩散
 - 地址：`0x00` 到 `0xFE` 为单播地址，`0xFF` 为广播地址；`dstID=0xFF,len16=0` 是状态包，`dstID=0xFF,len16>0` 是广播数据包
 - 帧格式：同步头 + 头部字段 `{srcID, dstID, count}` + `{len16, reserved}` + 可变长 payload + CRC32
+- `app_payload_addr` / `app_rx_payload_addr` 是上层本地 payload RAM 的读写索引，不属于帧格式
 - 健壮性：`len16` 限制最大 payload 256 words，异常帧直接丢弃
 - 去重键：`(srcID, count)`
 - 在线判定：最近 5 个周期内任意一次收到即判定在线
@@ -203,7 +208,7 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
 
 - 工程已完成模块化 RTL 拆分，各模块职责清晰、接口标准化
 - `node.v` 为兼容性封装，实际逻辑入口为 `node_top.v`
-- 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`）
+- 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`），并使用 IP 的 `wr_data_count` 做 TX 整帧空间预检查
 
 ## 使用建议
 
@@ -221,3 +226,4 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
 2. 是否发送数据帧由上层模块给信号控制，数据帧内容（包括目的节点，数据长度，数据内容）也由上层模块给出，没有数据帧时就发送生存状态帧
 3. 接收机收到数据帧也可以据此获知 srcID 对应的节点存活
 4. 生存状态帧数据不随复位清零，不受复位控制
+5. 向多个发送端口写入同一个帧前，使用 TX FIFO `wr_data_count` 检查整帧空间；任一目标端口空间不足时直接丢弃该帧，不写入半帧

@@ -20,7 +20,7 @@ module frame_rx #(
     output reg  [7:0]  rx_dst_id,
     output reg  [15:0] rx_count,
     output reg  [15:0] rx_len16,
-    input  wire [15:0] payload_addr,
+    input  wire [15:0] payload_index,
     output wire [31:0] rx_payload,
     output reg         rx_is_broadcast,
     input  wire        frame_consumed
@@ -46,7 +46,7 @@ module frame_rx #(
     );
 
     assign fifo_rd_en = (st != CHECK && st != DONE);
-    assign rx_payload = (st == DONE && frame_ready) ? buff[payload_addr] : 32'd0;
+    assign rx_payload = (st == DONE && frame_ready) ? buff[payload_index] : 32'd0;
 
     always @(posedge clk) begin
         if (rst) begin

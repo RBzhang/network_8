@@ -54,8 +54,8 @@ module node (
 ```
 
 - **node_id_valid / node_id**：`node_id_valid=1` 时将 `node_id` 的 8bit 幅值锁存为本节点 ID。模块只响应第一次有效脉冲，后续脉冲全部忽略；锁存前 RX、TX、调度、探活等逻辑保持空闲并忽略所有数据流。
-- **app_frame\***：上层发送数据帧接口。`app_frame_valid && app_frame_ready` 时锁存目的节点和长度，随后模块按 `app_payload_addr` 逐 word 读取 `app_payload_data` 并封装成协议帧发送。若无上层数据帧请求，模块按周期发送生存状态帧。
-- **app_rx\***：上层接收数据帧接口。本节点收到 `dstID == 本机ID` 的单播数据帧，或收到 `dstID == 0xFF && len16 > 0` 的广播数据帧并完成本地处理后，先用 `app_rx_frame_valid` 上报 header，再用 `app_rx_payload_valid` 按 word 上报 payload。上层通过 `app_rx_frame_ready` 和 `app_rx_payload_ready` 分别完成 header/payload 握手。
+- **app_frame\***：上层发送数据帧接口。`app_frame_valid && app_frame_ready` 时锁存目的节点和长度，随后模块按 `app_payload_addr` 逐 word 读取 `app_payload_data` 并封装成协议帧发送。若无上层数据帧请求，模块按周期发送生存状态帧。`app_payload_addr` 只是本地 payload RAM 的读索引，不属于帧格式字段。
+- **app_rx\***：上层接收数据帧接口。本节点收到 `dstID == 本机ID` 的单播数据帧，或收到 `dstID == 0xFF && len16 > 0` 的广播数据帧时，先用 `app_rx_frame_valid` 上报 header，再用 `app_rx_payload_valid` 按 word 上报 payload；若该帧是广播数据包，则完成本地上报后再继续转发。上层通过 `app_rx_frame_ready` 和 `app_rx_payload_ready` 分别完成 header/payload 握手。`app_rx_payload_addr` 同样只是本地上报 payload 的 word 索引，不进入网络帧。
 
 节点内部处理逻辑运行在 **160 MHz** 主时钟域。每个光模块独占一组**异步 RX FIFO 和异步 TX FIFO**（跨时钟域）；端口数据在各自的 `rx_clk*` / `tx_clk*` 域采样和输出，内部调度、去重和判定仍在 `clk` 域完成。详见 [FIFO 架构](#10-fifo-架构与并行处理)。
 
@@ -127,6 +127,7 @@ module node (
 
 - 数据帧是否发送由上层 `app_frame_valid` 控制，目的节点、payload 长度和 payload 内容均由上层提供。
 - 调度器空闲且 `app_frame_valid && app_frame_ready` 时，模块锁存上层数据帧请求，并将该帧写入所有端口的 TX FIFO，由各端口按队列顺序发出。
+- 写入 TX FIFO 前，调度器使用 FIFO IP 的 `wr_data_count` 在写时钟域检查整帧剩余空间。整帧所需 word 数为 `4 + len16`（同步头、两字 header、payload、CRC）；任一目标端口空间不足时，该待发帧直接丢弃，不写入半帧。
 - 没有上层数据帧请求时，节点固定**每 1 秒**产生一个零 payload 的广播状态包，用于生存状态探活。
 - 节点自己产生的数据帧和状态包共用 `count` 字段，发送时 `count` 自增 1。
 - **转发他人的包不受 1 秒限制**：调度器处理完一帧后，若需转发，立即写入对应端口的 TX FIFO。
@@ -302,19 +303,20 @@ graph TB
 - 不受 1 秒周期限制，有数据即发。
 - 每帧发送前自动插入同步头，计算并追加 CRC32。
 
-### 10.5 背压机制
+### 10.5 TX FIFO 空间检查
 
-- 每个异步 TX FIFO 提供 **`full` 背压信号**。
-- 当 TX FIFO 已满时，调度器**暂停向该端口写入待发帧**，等待 TX FIFO 腾出空间。
-- 背压逐级传导：TX FIFO full → 调度器等待 → 帧接收状态机的 "帧就绪" 帧暂留 → 若所有 buffer 满，新到帧被丢弃。
+- 每个异步 TX FIFO 提供 **`full`** 和写时钟域下的 **`wr_data_count`**。
+- 调度器在启动 `frame_tx` 前计算整帧长度 `4 + len16`，并检查所有目标端口是否满足 `wr_data_count + frame_words <= FIFO_DEPTH` 且 `full=0`。
+- 若目标端口中任意一个空间不足，调度器直接丢弃该待发帧：本地帧释放本地请求，转发帧释放接收 buffer 并结束该候选。这样不会向 TX FIFO 写入半帧，也不会让发送状态机在帧中途因空间不足而长期等待。
+- 若空间充足，`frame_tx` 连续写入同步头、header、payload 和 CRC；TX 侧仍在各自 `tx_clk*` 域按 FIFO 非空自助发送。
 
 ```mermaid
 flowchart LR
     SM["帧接收状态机"] -->|"verified frame"| SCH["调度器"]
-    SCH -->|"待发帧"| TXF["异步 TX FIFO"]
+    SCH -->|"空间足够才启动整帧写入"| TXF["异步 TX FIFO"]
     TXF -->|"发送"| OPT["光模块"]
-    TXF -.->|"full 背压"| SCH
-    SCH -.->|"暂停写入"| SM
+    TXF -.->|"full / wr_data_count"| SCH
+    SCH -.->|"空间不足则丢弃候选帧"| SM
 ```
 
 ### 10.6 时钟域
@@ -355,6 +357,6 @@ flowchart LR
 | 多端口并行接收 | 每端口独立状态机从异步 RX FIFO 读数据 | 双端口同时收包不丢帧 |
 | 统一调度器 | 轮询各状态机，仲裁后统一决策 | 去重/转发决策原子性 |
 | 自助式发送 | 检测 TX FIFO 非空即发，不受周期限制 | 转发包实时发送 |
-| 异步 FIFO 背压 | TX FIFO full 暂停写入 | 跨时钟域拥塞时有序退让 |
+| 异步 FIFO 空间检查 | 启动发送前用 `wr_data_count` 检查整帧空间，不足直接丢弃 | 避免 TX FIFO 中出现半帧和长时间中途等待 |
 | node_id 外部脉冲输入 | 第一次 `node_id_valid` 时锁存幅值，后续脉冲忽略 | 多节点部署共用同一 bitstream |
 | 复位行为 | count/去重表/FIFO 清零，生存状态窗口保留 | 复位不抹掉已知节点存活信息 |

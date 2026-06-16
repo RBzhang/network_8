@@ -5,7 +5,8 @@
 //------------------------------------------------------------------------------
 module port_cdc #(
     parameter FIFO_DEPTH = 512,
-    parameter NUM_PORTS  = 2
+    parameter NUM_PORTS  = 2,
+    parameter FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH)
 ) (
     input  wire        rst,
     input  wire        id_locked,
@@ -25,6 +26,7 @@ module port_cdc #(
     input  wire [NUM_PORTS-1:0] tx_wr_en,
     input  wire [NUM_PORTS*32-1:0] tx_din_flat,
     output wire [NUM_PORTS-1:0] tx_full,
+    output wire [NUM_PORTS*FIFO_COUNT_W-1:0] tx_wr_data_count_flat,
     output wire [NUM_PORTS*32-1:0] tx_dout_flat,
     output wire [NUM_PORTS-1:0] tx_empty,
     output wire [31:0] out0,
@@ -59,12 +61,15 @@ module port_cdc #(
     generate
         for (p = 0; p < NUM_PORTS; p = p + 1) begin : g_fifo
             if (p == 0) begin : g_port0
+                wire [FIFO_COUNT_W-1:0] unused_rx_wr_data_count;
+
                 async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx_fifo (
                     .wr_clk(rx_clk0),
                     .rst(rst),
                     .wr_en(valid_in0 && id_locked_rx0),
                     .din(in0),
                     .full(rx_full[p]),
+                    .wr_data_count(unused_rx_wr_data_count),
                     .rd_clk(clk),
                     .rd_en(rx_rd_en[p]),
                     .dout(rx_dout_flat[p*32 +: 32]),
@@ -76,18 +81,22 @@ module port_cdc #(
                     .wr_en(tx_wr_en[p]),
                     .din(tx_din_flat[p*32 +: 32]),
                     .full(tx_full[p]),
+                    .wr_data_count(tx_wr_data_count_flat[p*FIFO_COUNT_W +: FIFO_COUNT_W]),
                     .rd_clk(tx_clk0),
                     .rd_en(!tx_empty[p]),
                     .dout(tx_dout_flat[p*32 +: 32]),
                     .empty(tx_empty[p])
                 );
             end else begin : g_port1
+                wire [FIFO_COUNT_W-1:0] unused_rx_wr_data_count;
+
                 async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx_fifo (
                     .wr_clk(rx_clk1),
                     .rst(rst),
                     .wr_en(valid_in1 && id_locked_rx1),
                     .din(in1),
                     .full(rx_full[p]),
+                    .wr_data_count(unused_rx_wr_data_count),
                     .rd_clk(clk),
                     .rd_en(rx_rd_en[p]),
                     .dout(rx_dout_flat[p*32 +: 32]),
@@ -99,6 +108,7 @@ module port_cdc #(
                     .wr_en(tx_wr_en[p]),
                     .din(tx_din_flat[p*32 +: 32]),
                     .full(tx_full[p]),
+                    .wr_data_count(tx_wr_data_count_flat[p*FIFO_COUNT_W +: FIFO_COUNT_W]),
                     .rd_clk(tx_clk1),
                     .rd_en(!tx_empty[p]),
                     .dout(tx_dout_flat[p*32 +: 32]),

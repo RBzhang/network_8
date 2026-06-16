@@ -18,7 +18,7 @@ module rx_dispatcher #(
     input  wire [NUM_PORTS*8-1:0]  rx_dst_id_flat,
     input  wire [NUM_PORTS*16-1:0] rx_count_flat,
     input  wire [NUM_PORTS*16-1:0] rx_len16_flat,
-    output wire [NUM_PORTS*16-1:0] rx_payload_addr_flat,
+    output wire [NUM_PORTS*16-1:0] rx_payload_index_flat,
     input  wire [NUM_PORTS*32-1:0] rx_payload_data_flat,
     input  wire [NUM_PORTS-1:0] rx_is_broadcast,
     output reg         app_rx_frame_valid,
@@ -57,7 +57,7 @@ module rx_dispatcher #(
     reg [PORT_W-1:0] active_port;
     reg [15:0] payload_index;
     reg        local_needs_forward;
-    reg [15:0] rx_payload_addr_r [0:NUM_PORTS-1];
+    reg [15:0] rx_payload_index_r [0:NUM_PORTS-1];
     integer i;
 
     wire [7:0]  active_src_id = rx_src_id_flat[active_port*8 +: 8];
@@ -69,7 +69,7 @@ module rx_dispatcher #(
     genvar rp;
     generate
         for (rp = 0; rp < NUM_PORTS; rp = rp + 1) begin : g_addr_flat
-            assign rx_payload_addr_flat[rp*16 +: 16] = rx_payload_addr_r[rp];
+            assign rx_payload_index_flat[rp*16 +: 16] = rx_payload_index_r[rp];
         end
     endgenerate
 
@@ -100,7 +100,7 @@ module rx_dispatcher #(
             forward_count <= 16'd0;
             forward_len16 <= 16'd0;
             for (i = 0; i < NUM_PORTS; i = i + 1)
-                rx_payload_addr_r[i] <= 16'd0;
+                rx_payload_index_r[i] <= 16'd0;
         end else begin
             frame_consumed <= {NUM_PORTS{1'b0}};
             liveness_update <= 1'b0;
@@ -141,7 +141,7 @@ module rx_dispatcher #(
                             app_rx_frame_valid <= 1'b1;
                             local_needs_forward <= rx_is_broadcast[active_port] && (active_len16 != 0);
                             payload_index <= 16'd0;
-                            rx_payload_addr_r[active_port] <= 16'd0;
+                            rx_payload_index_r[active_port] <= 16'd0;
                             st <= S_LOCAL_HDR;
                         end else begin
                             forward_rx_port <= active_port;
@@ -173,7 +173,7 @@ module rx_dispatcher #(
                             end
                         end else begin
                             payload_index <= 16'd0;
-                            rx_payload_addr_r[active_port] <= 16'd0;
+                            rx_payload_index_r[active_port] <= 16'd0;
                             st <= S_LOCAL_LOAD;
                         end
                     end
@@ -204,7 +204,7 @@ module rx_dispatcher #(
                             end
                         end else begin
                             payload_index <= payload_index + 1'b1;
-                            rx_payload_addr_r[active_port] <= payload_index + 1'b1;
+                            rx_payload_index_r[active_port] <= payload_index + 1'b1;
                             st <= S_LOCAL_LOAD;
                         end
                     end

@@ -52,6 +52,7 @@ module node_top #(
     output wire        liveness_alive
 );
     localparam PORT_W = (NUM_PORTS <= 1) ? 1 : $clog2(NUM_PORTS);
+    localparam FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH);
 
     wire [7:0] my_id;
     wire       id_locked;
@@ -72,6 +73,7 @@ module node_top #(
 
     wire [NUM_PORTS-1:0] tx_empty;
     wire [NUM_PORTS-1:0] tx_full;
+    wire [NUM_PORTS*FIFO_COUNT_W-1:0] tx_wr_data_count_flat;
     wire [NUM_PORTS-1:0] tx_wr_en;
     wire [31:0]          tx_din  [0:NUM_PORTS-1];
     wire [31:0]          tx_dout [0:NUM_PORTS-1];
@@ -109,6 +111,7 @@ module node_top #(
         .tx_wr_en(tx_wr_en),
         .tx_din_flat(tx_din_flat),
         .tx_full(tx_full),
+        .tx_wr_data_count_flat(tx_wr_data_count_flat),
         .tx_dout_flat(tx_dout_flat),
         .tx_empty(tx_empty),
         .out0(out0),
@@ -123,18 +126,18 @@ module node_top #(
     wire [7:0]           rx_dst_id [0:NUM_PORTS-1];
     wire [15:0]          rx_count  [0:NUM_PORTS-1];
     wire [15:0]          rx_len16  [0:NUM_PORTS-1];
-    wire [15:0]          rx_payload_addr [0:NUM_PORTS-1];
+    wire [15:0]          rx_payload_index [0:NUM_PORTS-1];
     wire [31:0]          rx_payload_data [0:NUM_PORTS-1];
     wire [NUM_PORTS-1:0] rx_is_broadcast;
     wire [NUM_PORTS*8-1:0]  rx_src_id_flat;
     wire [NUM_PORTS*8-1:0]  rx_dst_id_flat;
     wire [NUM_PORTS*16-1:0] rx_count_flat;
     wire [NUM_PORTS*16-1:0] rx_len16_flat;
-    wire [NUM_PORTS*16-1:0] rx_dispatch_payload_addr_flat;
+    wire [NUM_PORTS*16-1:0] rx_dispatch_payload_index_flat;
     wire [NUM_PORTS*32-1:0] rx_payload_data_flat;
     wire                    tx_payload_is_forward;
     wire [PORT_W-1:0]       tx_forward_payload_port;
-    wire [15:0]             tx_shared_payload_addr;
+    wire [15:0]             tx_shared_payload_index;
 
     genvar p;
     generate
@@ -153,7 +156,7 @@ module node_top #(
                 .rx_dst_id(rx_dst_id[p]),
                 .rx_count(rx_count[p]),
                 .rx_len16(rx_len16[p]),
-                .payload_addr(rx_payload_addr[p]),
+                .payload_index(rx_payload_index[p]),
                 .rx_payload(rx_payload_data[p]),
                 .rx_is_broadcast(rx_is_broadcast[p]),
                 .frame_consumed(frame_consumed[p])
@@ -162,9 +165,9 @@ module node_top #(
             assign rx_dst_id_flat[p*8 +: 8] = rx_dst_id[p];
             assign rx_count_flat[p*16 +: 16] = rx_count[p];
             assign rx_len16_flat[p*16 +: 16] = rx_len16[p];
-            assign rx_payload_addr[p] = (tx_payload_is_forward && (tx_forward_payload_port == p))
-                                      ? tx_shared_payload_addr
-                                      : rx_dispatch_payload_addr_flat[p*16 +: 16];
+            assign rx_payload_index[p] = (tx_payload_is_forward && (tx_forward_payload_port == p))
+                                       ? tx_shared_payload_index
+                                       : rx_dispatch_payload_index_flat[p*16 +: 16];
             assign rx_payload_data_flat[p*32 +: 32] = rx_payload_data[p];
         end
     endgenerate
@@ -195,7 +198,7 @@ module node_top #(
         .rx_dst_id_flat(rx_dst_id_flat),
         .rx_count_flat(rx_count_flat),
         .rx_len16_flat(rx_len16_flat),
-        .rx_payload_addr_flat(rx_dispatch_payload_addr_flat),
+        .rx_payload_index_flat(rx_dispatch_payload_index_flat),
         .rx_payload_data_flat(rx_payload_data_flat),
         .rx_is_broadcast(rx_is_broadcast),
         .app_rx_frame_valid(app_rx_frame_valid),
@@ -301,8 +304,8 @@ module node_top #(
     wire [NUM_PORTS-1:0] tx_start;
     wire [NUM_PORTS-1:0] tx_busy;
     wire [NUM_PORTS-1:0] tx_done;
-    wire [15:0]          tx_payload_addr [0:NUM_PORTS-1];
-    wire [NUM_PORTS*16-1:0] tx_payload_addr_flat;
+    wire [15:0]          tx_payload_index [0:NUM_PORTS-1];
+    wire [NUM_PORTS*16-1:0] tx_payload_index_flat;
     wire [7:0]           tx_src_id;
     wire [7:0]           tx_dst_id;
     wire [15:0]          tx_count;
@@ -310,7 +313,9 @@ module node_top #(
     wire [31:0]          tx_payload_data;
 
     tx_arbiter #(
-        .NUM_PORTS(NUM_PORTS)
+        .NUM_PORTS(NUM_PORTS),
+        .FIFO_DEPTH(FIFO_DEPTH),
+        .FIFO_COUNT_W(FIFO_COUNT_W)
     ) u_tx_arbiter (
         .clk(clk),
         .rst(rst || !id_locked),
@@ -330,7 +335,9 @@ module node_top #(
         .forward_payload_port(forward_payload_port),
         .tx_busy(tx_busy),
         .tx_done(tx_done),
-        .tx_payload_addr_flat(tx_payload_addr_flat),
+        .tx_full(tx_full),
+        .tx_wr_data_count_flat(tx_wr_data_count_flat),
+        .tx_payload_index_flat(tx_payload_index_flat),
         .tx_start(tx_start),
         .tx_src_id(tx_src_id),
         .tx_dst_id(tx_dst_id),
@@ -338,10 +345,10 @@ module node_top #(
         .tx_len16(tx_len16),
         .tx_payload_is_forward(tx_payload_is_forward),
         .tx_forward_payload_port(tx_forward_payload_port),
-        .shared_payload_addr(tx_shared_payload_addr)
+        .shared_payload_index(tx_shared_payload_index)
     );
 
-    assign app_payload_addr = tx_payload_is_forward ? 16'd0 : tx_shared_payload_addr;
+    assign app_payload_addr = tx_payload_is_forward ? 16'd0 : tx_shared_payload_index;
     assign tx_payload_data = tx_payload_is_forward
                            ? rx_payload_data[tx_forward_payload_port]
                            : app_payload_data;
@@ -359,7 +366,7 @@ module node_top #(
                 .dst_id(tx_dst_id),
                 .count(tx_count),
                 .len16(tx_len16),
-                .payload_addr(tx_payload_addr[t]),
+                .payload_index(tx_payload_index[t]),
                 .payload_data(tx_payload_data),
                 .tx_full(tx_full[t]),
                 .tx_wr_en(tx_wr_en[t]),
@@ -367,7 +374,7 @@ module node_top #(
                 .busy(tx_busy[t]),
                 .done(tx_done[t])
             );
-            assign tx_payload_addr_flat[t*16 +: 16] = tx_payload_addr[t];
+            assign tx_payload_index_flat[t*16 +: 16] = tx_payload_index[t];
         end
     endgenerate
 endmodule

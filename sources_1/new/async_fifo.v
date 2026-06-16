@@ -10,13 +10,15 @@ module async_fifo #(
     parameter WIDTH  = 32,
     parameter USE_IP = 1,
     parameter ADDR_W  = (DEPTH <= 1) ? 1 : $clog2(DEPTH),
-    parameter PTR_W   = ADDR_W + 1
+    parameter PTR_W   = ADDR_W + 1,
+    parameter COUNT_W = ADDR_W
 ) (
     input  wire             wr_clk,
     input  wire             rst,
     input  wire             wr_en,
     input  wire [WIDTH-1:0] din,
     output wire             full,
+    output wire [COUNT_W-1:0] wr_data_count,
 
     input  wire             rd_clk,
     input  wire             rd_en,
@@ -37,6 +39,7 @@ generate
             .rd_en(rd_en),
             .dout(dout[31:0]),
             .full(full),
+            .wr_data_count(wr_data_count),
             .empty(empty),
             .wr_rst_busy(wr_rst_busy),
             .rd_rst_busy(rd_rst_busy)
@@ -54,16 +57,31 @@ generate
         wire [PTR_W-1:0] wgray_inc;
         wire [PTR_W-1:0] rgray_inc;
         wire [PTR_W-1:0] wgray_full_cmp;
+        wire [PTR_W-1:0] rbin_sync;
+        wire [PTR_W-1:0] wr_count_full;
+
+        function [PTR_W-1:0] gray_to_bin;
+            input [PTR_W-1:0] gray;
+            integer gi;
+            begin
+                gray_to_bin[PTR_W-1] = gray[PTR_W-1];
+                for (gi = PTR_W - 2; gi >= 0; gi = gi - 1)
+                    gray_to_bin[gi] = gray_to_bin[gi + 1] ^ gray[gi];
+            end
+        endfunction
 
         assign wbin_inc = wbin + 1'b1;
         assign rbin_inc = rbin + 1'b1;
         assign wgray_inc = (wbin_inc >> 1) ^ wbin_inc;
         assign rgray_inc = (rbin_inc >> 1) ^ rbin_inc;
+        assign rbin_sync = gray_to_bin(rq2_wgray);
+        assign wr_count_full = wbin - rbin_sync;
 
         assign wgray_full_cmp = {~rq2_wgray[PTR_W-1:PTR_W-2], rq2_wgray[PTR_W-3:0]};
         assign full  = (wgray_inc == wgray_full_cmp);
         assign empty = (rgray == wq2_rgray);
         assign dout  = mem[rbin[ADDR_W-1:0]];
+        assign wr_data_count = wr_count_full[COUNT_W-1:0];
 
         always @(posedge wr_clk) begin
             if (rst) begin
