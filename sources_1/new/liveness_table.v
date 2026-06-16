@@ -36,35 +36,36 @@ module liveness_table #(
 
     always @(posedge clk) begin
         if (rst) begin
-            up <= 0; idx <= 0;
-            upload_valid <= 0; upload_node <= 0; upload_alive <= 0;
+            up <= 1'b0;
+            idx <= {NODE_W{1'b0}};
+            upload_valid <= 1'b0;
+            upload_node <= 8'd0;
+            upload_alive <= 1'b0;
         end else begin
-
-            if (update)
-                w[update_src][0] = 1;
+            upload_valid <= 1'b0;
 
             if (tick_1s) begin
-                up  <= 1;
-                idx <= 0;
-                upload_valid <= 0;
-                upload_node  <= 0;
-                upload_alive <= upload_alive;
+                up <= 1'b1;
+                idx <= {NODE_W{1'b0}};
                 for (i = 0; i < MAX_NODES; i = i + 1)
                     w[i] <= {w[i][WINDOW-2:0], 1'b0};
-            end
+                if (update)
+                    w[update_src] <= {w[update_src][WINDOW-2:0], 1'b1};
+            end else begin
+                if (update)
+                    w[update_src][0] <= 1'b1;
 
+                if (up) begin
+                    upload_node <= idx;
+                    upload_alive <= |w[idx];
+                    upload_valid <= 1'b1;
 
-            if (up) begin
-                upload_node  <= idx;
-                upload_alive <= |w[idx];
-                if (idx == MAX_NODES - 1) begin
-                    up <= 0;
-                    idx <= 0;
-                    upload_valid <= 0;
-                end else begin
-                    up <= 1'b1;
-                    idx <= idx + 1;
-                    upload_valid <= 1;
+                    if (idx == MAX_NODES - 1) begin
+                        up <= 1'b0;
+                        idx <= {NODE_W{1'b0}};
+                    end else begin
+                        idx <= idx + 1'b1;
+                    end
                 end
             end
         end
