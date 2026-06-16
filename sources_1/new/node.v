@@ -16,6 +16,7 @@ module node #(
 ) (
     input  wire        clk,
     input  wire        rst,
+    input  wire        node_id_valid,
     input  wire [7:0]  node_id,
     input  wire        rx_clk0,
     input  wire        rx_clk1,
@@ -25,6 +26,23 @@ module node #(
     input  wire [31:0] in1,
     input  wire        valid_in0,
     input  wire        valid_in1,
+    input  wire        app_frame_valid,
+    output wire        app_frame_ready,
+    output reg         app_frame_accepted,
+    input  wire [7:0]  app_dst_id,
+    input  wire [15:0] app_len16,
+    output reg  [15:0] app_payload_addr,
+    input  wire [31:0] app_payload_data,
+    output reg         app_rx_frame_valid,
+    input  wire        app_rx_frame_ready,
+    output reg  [7:0]  app_rx_src_id,
+    output reg  [7:0]  app_rx_dst_id,
+    output reg  [15:0] app_rx_count,
+    output reg  [15:0] app_rx_len16,
+    output reg         app_rx_payload_valid,
+    input  wire        app_rx_payload_ready,
+    output reg  [15:0] app_rx_payload_addr,
+    output reg  [31:0] app_rx_payload_data,
     output wire [31:0] out0,
     output wire [31:0] out1,
     output wire        valid_out0,
@@ -37,10 +55,29 @@ module node #(
     localparam SCAN_W = $clog2(NUM_PORTS + 1);
     localparam [NUM_PORTS-1:0] PORT_MASK = {NUM_PORTS{1'b1}};
 
+    localparam [15:0] MAX_PAYLOAD_LIM = MAX_PAYLOAD;
+
     reg [7:0] my_id;
+    reg       id_locked;
     always @(posedge clk) begin
-        if (rst) my_id <= node_id;
-        else     my_id <= my_id;
+        if (rst) begin
+            my_id <= 8'd0;
+            id_locked <= 1'b0;
+        end else if (!id_locked && node_id_valid) begin
+            my_id <= node_id;
+            id_locked <= 1'b1;
+        end
+    end
+
+    reg id_locked_rx0_meta, id_locked_rx0;
+    reg id_locked_rx1_meta, id_locked_rx1;
+    always @(posedge rx_clk0) begin
+        if (rst) begin id_locked_rx0_meta <= 1'b0; id_locked_rx0 <= 1'b0; end
+        else begin id_locked_rx0_meta <= id_locked; id_locked_rx0 <= id_locked_rx0_meta; end
+    end
+    always @(posedge rx_clk1) begin
+        if (rst) begin id_locked_rx1_meta <= 1'b0; id_locked_rx1 <= 1'b0; end
+        else begin id_locked_rx1_meta <= id_locked; id_locked_rx1 <= id_locked_rx1_meta; end
     end
 
     //----------------------------------------------------------------------
@@ -58,7 +95,7 @@ module node #(
             if (g == 0) begin : g_port0
                 async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx (
                     .wr_clk(rx_clk0), .rst(rst),
-                    .wr_en(valid_in0), .din(in0),
+                    .wr_en(valid_in0 && id_locked_rx0), .din(in0),
                     .full(rx_f[g]),
                     .rd_clk(clk), .rd_en(rx_rd[g]), .dout(rx_d[g]),
                     .empty(rx_e[g])
@@ -73,7 +110,7 @@ module node #(
             end else begin : g_port1
                 async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx (
                     .wr_clk(rx_clk1), .rst(rst),
-                    .wr_en(valid_in1), .din(in1),
+                    .wr_en(valid_in1 && id_locked_rx1), .din(in1),
                     .full(rx_f[g]),
                     .rd_clk(clk), .rd_en(rx_rd[g]), .dout(rx_d[g]),
                     .empty(rx_e[g])
@@ -120,7 +157,7 @@ module node #(
                 .SYNC_WORD(SYNC_WORD),
                 .MAX_PAYLOAD(MAX_PAYLOAD)
             ) u_fr (
-                .clk(clk), .rst(rst),
+                .clk(clk), .rst(rst || !id_locked),
                 .fifo_dout(rx_d[g]), .fifo_empty(rx_e[g]),
                 .fifo_rd_en(rx_rd[g]),
                 .frame_ready(fr_rdy[g]),
@@ -165,21 +202,21 @@ module node #(
     );
 
     // 1-second timer (counter from 0 to CLK_FREQ_HZ-1)
-    reg [31:0] tmr;
+    reg [31:0] tmr = 0;
     always @(posedge clk) begin
-        if (rst) tmr <= 0;
-        else     tmr <= (tmr == CLK_FREQ_HZ - 1) ? 0 : tmr + 1;
+        if (rst || !id_locked) tmr <= 0;
+        else tmr <= (tmr == CLK_FREQ_HZ - 1) ? 0 : tmr + 1;
     end
-    assign t1s = (tmr == CLK_FREQ_HZ - 1);
+    assign t1s = (tmr == CLK_FREQ_HZ - 1);     //  tick every 1 second
 
-    // Self-packet trigger: fires every 1 second
-    reg [15:0] self_c;
-    reg        self_tr;
+    // Local-packet trigger: data frames have priority; liveness frame fires every 1 second.
+    reg [15:0] local_count = 0;
+    reg        self_tr = 0;
     always @(posedge clk) begin
-        if (rst) begin self_c <= 0; self_tr <= 0; end
+        if (rst || !id_locked) self_tr <= 0;
         else begin
             self_tr <= 0;
-            if (t1s) begin self_c <= self_c + 1; self_tr <= 1; end
+            if (t1s) self_tr <= 1;
         end
     end
 
@@ -205,6 +242,9 @@ module node #(
     localparam [4:0] DEDUP_WAIT   = 5'd16;
     localparam [4:0] FWDCRC_WAIT  = 5'd17;
     localparam [4:0] SELFCRC_WAIT = 5'd18;
+    localparam [4:0] LOCAL_HDR    = 5'd19;
+    localparam [4:0] LOCAL_PWAIT  = 5'd20;
+    localparam [4:0] LOCAL_PAYLOAD = 5'd21;
 
     reg [4:0]  s;           // current state
     reg [PORT_W-1:0] sp;    // round-robin poll index
@@ -215,7 +255,12 @@ module node #(
     reg [15:0] sl;          // len16 of current frame
     reg [NUM_PORTS-1:0] fm; // forward port bitmask
     reg        selfp;       // 1 = self-packet (suppress fr_done in DISCARD)
+    reg [7:0]  local_dst;
+    reg [15:0] local_len;
+    reg [15:0] local_frame_count;
     integer    p;
+
+    assign app_frame_ready = id_locked && (s == POLL);
 
     wire [NUM_PORTS-1:0] ports_except_rp;
     genvar j;
@@ -230,15 +275,19 @@ module node #(
     reg [31:0] crc_d;
     wire [31:0] crc_r;
     crc32_calc u_sc (
-        .clk(clk), .rst(rst),
+        .clk(clk), .rst(rst || !id_locked),
         .init(crc_i), .en(crc_e), .data(crc_d),
         .finalize(crc_f), .crc_out(crc_r)
     );
 
     always @(posedge clk) begin
-        if (rst) begin
+        if (rst || !id_locked) begin
             s <= IDLE; sp <= 0; rp <= 0; poll_idx <= 0; poll_scan <= 0; si <= 0; sl <= 0; fm <= 0;
-            selfp <= 0;
+            selfp <= 0; local_dst <= BROADCAST; local_len <= 0; local_frame_count <= 0;
+            app_frame_accepted <= 0; app_payload_addr <= 0; local_count <= 0;
+            app_rx_frame_valid <= 0; app_rx_src_id <= 0; app_rx_dst_id <= 0;
+            app_rx_count <= 0; app_rx_len16 <= 0;
+            app_rx_payload_valid <= 0; app_rx_payload_addr <= 0; app_rx_payload_data <= 0;
             fr_done <= {NUM_PORTS{1'b0}}; tx_wr <= {NUM_PORTS{1'b0}};
             for (p = 0; p < NUM_PORTS; p = p + 1)
                 tx_din[p] <= 32'd0;
@@ -249,13 +298,25 @@ module node #(
             fr_done <= {NUM_PORTS{1'b0}}; tx_wr <= {NUM_PORTS{1'b0}};
             d_lkup <= 0; d_ins <= 0; lv_upd <= 0;
             crc_i <= 0; crc_e <= 0; crc_f <= 0;
+            app_frame_accepted <= 0;
 
             case (s)
 
                 IDLE: begin s <= POLL; end
 
                 POLL: begin
-                    if (self_tr) begin
+                    if (app_frame_valid) begin
+                        local_dst <= app_dst_id;
+                        local_len <= (app_len16 > MAX_PAYLOAD_LIM) ? MAX_PAYLOAD_LIM : app_len16;
+                        local_frame_count <= local_count;
+                        local_count <= local_count + 1'b1;
+                        app_frame_accepted <= 1'b1;
+                        s <= SELFSET;
+                    end else if (self_tr) begin
+                        local_dst <= BROADCAST;
+                        local_len <= 16'd0;
+                        local_frame_count <= local_count;
+                        local_count <= local_count + 1'b1;
                         s <= SELFSET;
                     end else if (poll_scan == 0) begin
                         poll_idx <= sp;
@@ -299,8 +360,55 @@ module node #(
                 end
 
                 LOCAL: begin
-                    if (!fr_bc[rp]) begin fr_done[rp] <= 1; s <= IDLE; end
-                    else            s <= DEDUP;
+                    if (!fr_bc[rp]) begin
+                        app_rx_src_id <= fr_src[rp];
+                        app_rx_dst_id <= fr_dst[rp];
+                        app_rx_count <= fr_cnt[rp];
+                        app_rx_len16 <= sl;
+                        app_rx_frame_valid <= 1;
+                        app_rx_payload_valid <= 0;
+                        app_rx_payload_addr <= 0;
+                        fr_paddr[rp] <= 0;
+                        si <= 0;
+                        s <= LOCAL_HDR;
+                    end else begin
+                        s <= DEDUP;
+                    end
+                end
+
+                LOCAL_HDR: begin
+                    if (app_rx_frame_valid && app_rx_frame_ready) begin
+                        app_rx_frame_valid <= 0;
+                        if (sl > 0) begin
+                            fr_paddr[rp] <= 0;
+                            si <= 0;
+                            s <= LOCAL_PWAIT;
+                        end else begin
+                            fr_done[rp] <= 1;
+                            s <= IDLE;
+                        end
+                    end
+                end
+
+                LOCAL_PWAIT: begin
+                    app_rx_payload_addr <= si;
+                    app_rx_payload_data <= fr_pld[rp];
+                    app_rx_payload_valid <= 1;
+                    s <= LOCAL_PAYLOAD;
+                end
+
+                LOCAL_PAYLOAD: begin
+                    if (app_rx_payload_valid && app_rx_payload_ready) begin
+                        app_rx_payload_valid <= 0;
+                        if (si == sl - 1) begin
+                            fr_done[rp] <= 1;
+                            s <= IDLE;
+                        end else begin
+                            si <= si + 1'b1;
+                            fr_paddr[rp] <= si + 1'b1;
+                            s <= LOCAL_PWAIT;
+                        end
+                    end
                 end
 
                 DEDUP: begin
@@ -383,6 +491,7 @@ module node #(
                 // ---- Self-packet transmission ----
                 SELFSET: begin
                     crc_i <= 1; si <= 0; selfp <= 1;
+                    sl <= local_len; app_payload_addr <= 0;
                     fm <= PORT_MASK; s <= SELFDATA;
                 end
 
@@ -397,17 +506,30 @@ module node #(
                         end else if (si == 1) begin
                             for (p = 0; p < NUM_PORTS; p = p + 1)
                                 if (fm[p]) begin
-                                    tx_din[p] <= {my_id, BROADCAST, self_c}; tx_wr[p] <= 1;
+                                    tx_din[p] <= {my_id, local_dst, local_frame_count}; tx_wr[p] <= 1;
                                 end
-                            crc_e <= 1; crc_d <= {my_id, BROADCAST, self_c};
+                            crc_e <= 1; crc_d <= {my_id, local_dst, local_frame_count};
                             si <= 2; s <= SELFDATA;
                         end else if (si == 2) begin
                             for (p = 0; p < NUM_PORTS; p = p + 1)
                                 if (fm[p]) begin
-                                    tx_din[p] <= 0; tx_wr[p] <= 1;
+                                    tx_din[p] <= {sl, 16'd0}; tx_wr[p] <= 1;
                                 end
-                            crc_e <= 1; crc_d <= 0;
-                            s <= SELFCRC;
+                            crc_e <= 1; crc_d <= {sl, 16'd0};
+                            if (sl > 0) begin app_payload_addr <= 0; si <= 3; end
+                            else        begin s <= SELFCRC; end
+                        end else if (si >= 3 && si < (3 + sl)) begin
+                            for (p = 0; p < NUM_PORTS; p = p + 1)
+                                if (fm[p]) begin
+                                    tx_din[p] <= app_payload_data; tx_wr[p] <= 1;
+                                end
+                            crc_e <= 1; crc_d <= app_payload_data;
+                            if (si == 3 + sl - 1) begin
+                                s <= SELFCRC;
+                            end else begin
+                                app_payload_addr <= si - 3 + 1;
+                                si <= si + 1;
+                            end
                         end
                     end
                 end
@@ -430,5 +552,4 @@ module node #(
             endcase
         end
     end
-
 endmodule

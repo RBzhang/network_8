@@ -25,17 +25,37 @@ graph LR
 ```verilog
 module node (
     input  clk, rst,
-    input  [7:0]  node_id,           // 本节点 ID，复位时锁存
+    input         node_id_valid,     // 节点 ID 脉冲有效
+    input  [7:0]  node_id,           // 本节点 ID 脉冲幅值
     input         rx_clk0, rx_clk1,  // 光模块 0/1 的 RX 时钟
     input         tx_clk0, tx_clk1,  // 光模块 0/1 的 TX 时钟
     input  [31:0] in0, in1,          // 光模块 0/1 的 RX 数据
     input         valid_in0, valid_in1,
+    input         app_frame_valid,   // 上层请求发送数据帧
+    output        app_frame_ready,
+    output        app_frame_accepted,
+    input  [7:0]  app_dst_id,
+    input  [15:0] app_len16,
+    output [15:0] app_payload_addr,
+    input  [31:0] app_payload_data,
+    output        app_rx_frame_valid, // 收到本节点数据帧
+    input         app_rx_frame_ready,
+    output [7:0]  app_rx_src_id,
+    output [7:0]  app_rx_dst_id,
+    output [15:0] app_rx_count,
+    output [15:0] app_rx_len16,
+    output        app_rx_payload_valid,
+    input         app_rx_payload_ready,
+    output [15:0] app_rx_payload_addr,
+    output [31:0] app_rx_payload_data,
     output [31:0] out0, out1,        // 光模块 0/1 的 TX 数据
     output        valid_out0, valid_out1
 );
 ```
 
-- **node_id**：8bit 外部输入，`rst` 释放时锁存，此后运行期间不变。
+- **node_id_valid / node_id**：`node_id_valid=1` 时将 `node_id` 的 8bit 幅值锁存为本节点 ID。模块只响应第一次有效脉冲，后续脉冲全部忽略；锁存前 RX、TX、调度、探活等逻辑保持空闲并忽略所有数据流。
+- **app_frame\***：上层发送数据帧接口。`app_frame_valid && app_frame_ready` 时锁存目的节点和长度，随后模块按 `app_payload_addr` 逐 word 读取 `app_payload_data` 并封装成协议帧发送。若无上层数据帧请求，模块按周期发送生存状态帧。
+- **app_rx\***：上层接收数据帧接口。本节点收到 `dstID == 本机ID` 的单播数据帧并完成本地处理后，先用 `app_rx_frame_valid` 上报 header，再用 `app_rx_payload_valid` 按 word 上报 payload。上层通过 `app_rx_frame_ready` 和 `app_rx_payload_ready` 分别完成 header/payload 握手。
 
 节点内部处理逻辑运行在 **160 MHz** 主时钟域。每个光模块独占一组**异步 RX FIFO 和异步 TX FIFO**（跨时钟域）；端口数据在各自的 `rx_clk*` / `tx_clk*` 域采样和输出，内部调度、去重和判定仍在 `clk` 域完成。详见 [FIFO 架构](#10-fifo-架构与并行处理)。
 
@@ -105,8 +125,10 @@ module node (
 
 ### 6.1 时序
 
-- 每个节点固定**每 1 秒**产生一个**自有的包**（可以是数据包或状态包），发送时 `count` 字段自增 1。
-- 自有包产生后写入所有端口的 TX FIFO，由各端口按队列顺序发出。
+- 数据帧是否发送由上层 `app_frame_valid` 控制，目的节点、payload 长度和 payload 内容均由上层提供。
+- 调度器空闲且 `app_frame_valid && app_frame_ready` 时，模块锁存上层数据帧请求，并将该帧写入所有端口的 TX FIFO，由各端口按队列顺序发出。
+- 没有上层数据帧请求时，节点固定**每 1 秒**产生一个零 payload 的广播状态包，用于生存状态探活。
+- 节点自己产生的数据帧和状态包共用 `count` 字段，发送时 `count` 自增 1。
 - **转发他人的包不受 1 秒限制**：调度器处理完一帧后，若需转发，立即写入对应端口的 TX FIFO。
 
 ### 6.2 发送方向
@@ -167,14 +189,16 @@ flowchart TD
 |------|------|------|
 | ⓪ | CRC32 校验失败 | **丢弃**整帧，不做任何后续处理 |
 | ① | `srcID == 本机ID` | **丢弃，不转发**。自己发出的包绕环一周回到自己时终止 |
-| ② | `dstID == 本机ID`（单播命中） | **本地处理**，然后**终结，不转发** |
-| ③ | `dstID == 0xFF`（广播） | **本地处理**，然后**继续转发**到其他光模块 |
+| ② | `dstID == 本机ID`（单播命中） | **本地处理**，将数据帧 header 和 payload 反馈给上层接口，然后**终结，不转发** |
+| ③ | `dstID == 0xFF`（广播） | **本地处理**，更新生存状态，然后**继续转发**到其他光模块 |
 | ④ | `dstID != 本机ID 且 != 0xFF` | 不处理 payload，检查去重后转发 |
 | ⑤ | `(srcID, count)` 重复 | **丢弃**，不处理，不转发 |
 
 > **关键**：CRC 校验在包头解析之后、决策之前执行；校验不通过直接丢弃，确保后续去重/转发链路上的数据完整性。
 >
 > **关键**：规则 ① 解决了包无限循环的问题，源节点识别自己发出的包并终结它，形成天然的 TTL。
+>
+> **关键**：只要收到 CRC 正确且 `srcID != 本机ID` 的帧，都会用 `srcID` 更新生存状态窗口；单播数据帧也可用于判定源节点存活。只有 `dstID == 本机ID` 的单播数据帧会通过 `app_rx_*` 接口反馈给上层。
 
 ## 8. 去重机制
 
@@ -203,9 +227,11 @@ graph TB
 ### 判定规则
 
 - 采用**滑动窗口**（窗口大小 = 5），记录每个节点最近 5 个周期是否收到包。
+- 收到 CRC 正确且 `srcID != 本机ID` 的状态包或数据包时，都会将对应 `srcID` 的窗口最低位置 1。
 - 只有在**连续 5 次**均未收到某节点的包时，才将该节点标记为 `offline`。
 - 只要窗口内有任意一次收到，状态保持 `alive`。
 - 生存状态表**每 1 秒**由节点模块上传给上层模块，供上层做路由决策或故障处理。
+- 生存状态窗口不受 `rst` 清零控制；复位只清上传控制状态，不清除已经记录的窗口内容。
 
 ```mermaid
 flowchart LR
@@ -299,14 +325,14 @@ flowchart LR
 
 | 资源 | 行为 |
 |------|------|
-| **node_id** | 外部输入，`rst` 释放时锁存，运行期间不变 |
+| **node_id** | `rst` 后等待第一次 `node_id_valid` 脉冲，锁存 `node_id` 幅值；锁存前忽略所有数据流，后续 ID 脉冲忽略 |
 | **count** | 清零 |
 | **去重表** | 清空（所有条目无效） |
-| **生存状态表** | 清零，所有节点初始状态为 offline |
+| **生存状态表** | 窗口内容不随 `rst` 清零；只复位上传状态机输出 |
 | **RX/TX FIFO** | 清空 |
 | **帧接收状态机** | 回到 IDLE 状态 |
 
-`rst` 释放后，节点立即开始按 1 秒周期发送状态包，各表从零开始逐步填充。
+`rst` 释放后，节点不会立即处理网络流量；只有第一次 `node_id_valid` 脉冲完成节点编号赋值后，RX、TX、调度、探活定时器才开始运行。
 
 ## 12. 设计要点总结
 
@@ -315,6 +341,8 @@ flowchart LR
 | CRC32 校验 | 覆盖头部 + payload，校验失败丢弃 | 链路比特错误扩散 |
 | 帧边界保护 | len16 定界，范围内忽略同步头；len16>256 立即丢弃 | payload 数据透明性 + 异常帧长攻击 |
 | dstID = `0xFF` 广播 | 状态包统一使用广播地址，所有节点均处理并转发 | 状态包语义模糊 |
+| 上层发送接口 | 上层控制数据帧发送，并提供 dstID、len16、payload | 业务数据由系统上层统一调度 |
+| 上层接收接口 | 本机单播数据帧处理后通过 `app_rx_*` 输出 header 和 payload | 业务数据可从网络层回传给上层 |
 | srcID 自检 | 收到 srcID == 本机 的包立即丢弃 | 包无限循环 |
 | 多方向发送（自有包） | 自己产生的包向所有光模块发出 | 提高到达率，降低延迟 |
 | 单方向转发（他人包） | 转发时排除接收端口 | 避免回传风暴 |
@@ -324,5 +352,5 @@ flowchart LR
 | 统一调度器 | 轮询各状态机，仲裁后统一决策 | 去重/转发决策原子性 |
 | 自助式发送 | 检测 TX FIFO 非空即发，不受周期限制 | 转发包实时发送 |
 | 异步 FIFO 背压 | TX FIFO full 暂停写入 | 跨时钟域拥塞时有序退让 |
-| node_id 外部输入 | rst 释放时锁存 | 多节点部署共用同一 bitstream |
-| 复位清零 | count/去重表/状态表/FIFO 全清 | 可预期的冷启动行为 |
+| node_id 外部脉冲输入 | 第一次 `node_id_valid` 时锁存幅值，后续脉冲忽略 | 多节点部署共用同一 bitstream |
+| 复位行为 | count/去重表/FIFO 清零，生存状态窗口保留 | 复位不抹掉已知节点存活信息 |

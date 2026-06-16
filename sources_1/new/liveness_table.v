@@ -24,12 +24,20 @@ module liveness_table #(
     reg       up;
     integer i;
 
+    initial begin
+        up = 0;
+        idx = 0;
+        upload_valid = 0;
+        upload_node = 0;
+        upload_alive = 0;
+        for (i = 0; i < MAX_NODES; i = i + 1)
+            w[i] = {WINDOW{1'b0}};
+    end
+
     always @(posedge clk) begin
         if (rst) begin
             up <= 0; idx <= 0;
             upload_valid <= 0; upload_node <= 0; upload_alive <= 0;
-            for (i = 0; i < MAX_NODES; i = i + 1)
-                w[i] <= {WINDOW{1'b0}};
         end else begin
             if (tick_1s) begin
                 up  <= 1;
