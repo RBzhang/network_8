@@ -53,7 +53,8 @@ module node #(
     output wire        liveness_valid,
     output wire [7:0]  liveness_node,
     output wire        liveness_alive,
-    output wire        network_congested
+    output wire        network_congested,
+    output wire        app_len_error
 );
     node_top #(
         .SYNC_WORD(SYNC_WORD),
@@ -105,6 +106,7 @@ module node #(
         .liveness_valid(liveness_valid),
         .liveness_node(liveness_node),
         .liveness_alive(liveness_alive),
-        .network_congested(network_congested)
+        .network_congested(network_congested),
+        .app_len_error(app_len_error)
     );
 endmodule

@@ -52,7 +52,7 @@ module frame_rx #(
         .finalize(crc_final), .crc_out(crc_res)
     );
 
-    assign fifo_rd_en = !rx_pause && (st != CRC_WAIT) && (st != CHECK) && (st != DONE);
+    assign fifo_rd_en = !rx_pause && (st != CRC_WAIT) && (st != CHECK) && (st != DONE) && !fifo_empty;
     assign rx_payload = (st == DONE && frame_ready) ? buff[payload_index] : 32'd0;
 
     always @(posedge clk) begin

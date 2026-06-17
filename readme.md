@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-- 以 `node_top.v` 为核心连线顶层，`node.v` 为兼容性封装，建模双端口光互联节点。
+- 以 `node_top.v`/`node.v` 保留双端口板级兼容入口，实际可参数化逻辑位于 `node_core.v`。
 - 支持单播数据包、广播数据包与广播状态包。
 - 使用同步头、长度字段和 CRC32 完成帧同步、边界保护和完整性校验。
 - 通过上报/转发两张去重表分别抑制重复上报和重复转发，通过滑动窗口维护节点在线状态。
@@ -25,10 +25,11 @@ docs/architecture.md                 详细设计文档
 
 ```
 node.v (兼容性封装，仅实例化 node_top)
-  └── node_top.v (纯连线顶层)
+  └── node_top.v (2 光口板级 wrapper，保持旧接口)
+      └── node_core.v (NUM_PORTS 可参数化核心，使用扁平端口总线)
         ├── node_id_latch.v          — 首次脉冲 ID 锁存
         ├── port_cdc.v               — 异步 FIFO 跨时钟域 + 端口输出寄存器
-        │     └── async_fifo.v ×4    — 每端口 RX/TX 各一个异步 FIFO
+        │     └── async_fifo.v ×(2×NUM_PORTS) — 每端口 RX/TX 各一个异步 FIFO
         ├── frame_rx.v ×NUM_PORTS    — 每端口独立帧接收状态机
         ├── rx_dispatcher.v          — 帧分类与本地分发
         ├── rx_report_fifo.v         — 接收上报同步 FIFO + app_rx 读出重组
@@ -44,9 +45,31 @@ node.v (兼容性封装，仅实例化 node_top)
 
 ## 核心模块
 
-### `node_top.v` — 连线顶层
+### `node_top.v` — 2 光口板级 wrapper
 
-参数化的纯连线顶层，将所有功能模块按数据流连接在一起。不含任何过程逻辑，仅做实例化和总线拼接。支持的参数：
+保留现有板级接口和工程入口，仍使用 `rx_clk0/rx_clk1`、`tx_clk0/tx_clk1`、`in0/in1`、`out0/out1`、`valid_in0/valid_in1`、`valid_out0/valid_out1`。内部将两个端口打包为 `node_core` 的扁平总线：
+
+- `rx_clk_bus = {rx_clk1, rx_clk0}`
+- `tx_clk_bus = {tx_clk1, tx_clk0}`
+- `in_flat = {in1, in0}`
+- `valid_in_bus = {valid_in1, valid_in0}`
+
+`out0/out1` 和 `valid_out0/valid_out1` 从 `node_core` 的 `out_flat/valid_out` 拆出。此 wrapper 固定实例化 2 个光口，用于保持当前 Vivado 工程兼容。
+
+### `node_core.v` — 参数化网络核心
+
+真正参数化的纯连线核心，将所有功能模块按数据流连接在一起。不含协议过程逻辑，仅做实例化和总线拼接。端口使用 `NUM_PORTS` 展开的扁平总线：
+
+```verilog
+input  wire [NUM_PORTS-1:0]    rx_clk,
+input  wire [NUM_PORTS-1:0]    tx_clk,
+input  wire [NUM_PORTS*32-1:0] in_flat,
+input  wire [NUM_PORTS-1:0]    valid_in,
+output wire [NUM_PORTS*32-1:0] out_flat,
+output wire [NUM_PORTS-1:0]    valid_out
+```
+
+其余 `app_frame_*`、`app_rx_*`、生存状态和 `network_congested` 接口语义与 `node_top` 保持一致。支持的参数：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -60,7 +83,7 @@ node.v (兼容性封装，仅实例化 node_top)
 | `RX_REPORT_FIFO_DEPTH` | `2048` | 接收上报同步 FIFO 深度 |
 | `CLK_FREQ_HZ` | `160_000_000` | 主时钟频率 |
 | `CONGEST_TIMEOUT_SEC` | `5` | 拥塞阻塞超时秒数 |
-| `NUM_PORTS` | `2` | 光模块端口数 |
+| `NUM_PORTS` | `2` | `node_core` 光模块端口数 |
 
 ### `node.v` — 兼容性封装
 
@@ -75,12 +98,13 @@ node.v (兼容性封装，仅实例化 node_top)
 
 ### `port_cdc.v` — 端口跨时钟域
 
-隔离光模块接口时钟域（`rx_clk0/1`, `tx_clk0/1`）与内部主时钟域：
+隔离光模块接口时钟域（`rx_clk[p]`, `tx_clk[p]`）与内部主时钟域：
 
-- 将 `id_locked` 信号通过两级同步器传递到各 RX 时钟域，作为 RX FIFO 写使能的门控
+- 在每个 `rx_clk[p]` 域独立同步 `id_locked` 和 `rst`，作为 RX FIFO 写使能和复位控制
+- 在每个 `tx_clk[p]` 域独立同步 `rst`，用于端口输出寄存器复位
 - 每端口实例化一对 `async_fifo`（RX + TX）
 - 将 TX FIFO 写时钟域的 `wr_data_count` 汇总给发送仲裁器，用于整帧空间预检查
-- TX 侧持续监测 FIFO 非空，在端口自己的 `tx_clk*` 域输出 `out*` 和 `valid_out*`
+- TX 侧持续监测 FIFO 非空，在端口自己的 `tx_clk[p]` 域输出 `out_flat[p*32 +: 32]` 和 `valid_out[p]`
 
 ### `frame_rx.v` — 帧接收器
 
@@ -154,7 +178,7 @@ node.v (兼容性封装，仅实例化 node_top)
 - 数据帧优先级高于探活帧
 - `app_frame_accepted` 只表示发送请求描述符已锁存，不表示 payload 已经读完
 - `app_frame_done` 是本地 app 数据帧完成信号；上层必须等到它置位后才能释放或改写本次 payload RAM
-- `app_len16 > MAX_PAYLOAD` 时会被截断到 `MAX_PAYLOAD`，默认即 256 words
+- `app_len16 > MAX_PAYLOAD` 时 `app_frame_ready` 保持低电平，并通过 `app_len_error` 提示上层；已接受的数据帧直接使用 `app_len16` 作为 `packet_len16`，不会再做截断
 - `network_congested=1` 时压低 `app_frame_ready`，禁止上层继续写入新数据包
 - 维护 `count` 计数器（数据帧和探活帧共用）
 
@@ -234,14 +258,14 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
 ## 当前状态
 
 - 工程已完成模块化 RTL 拆分，各模块职责清晰、接口标准化
-- `node.v` 为兼容性封装，实际逻辑入口为 `node_top.v`
+- `node.v` 为兼容性封装，`node_top.v` 为 2 光口板级 wrapper，实际可参数化逻辑入口为 `node_core.v`
 - 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`），并使用 IP 的 `wr_data_count` 做 TX 整帧空间预检查，该 FIFO IP 已经被设定为 FWFT 模式
 - 接收上报路径使用 Vivado `fifo_generator_sync` 同步 FIFO IP（`sources_1/ip/fifo_generator_sync/fifo_generator_sync.xci`），32bit 宽、FWFT、有 `data_count` 接口；上层 `app_rx_*` 从该 FIFO 的读侧获取数据
 
 ## 使用建议
 
 1. 在 Vivado 中导入 `sources_1`、`constrs_1` 和 `sim_1` 对应文件
-2. 以 `sources_1/new/node_top.v` 为核心入口检查模块连接关系
+2. 当前双光口工程以 `sources_1/new/node_top.v` 为板级入口检查接口兼容性；扩展更多光口时以 `sources_1/new/node_core.v` 为核心入口配置 `NUM_PORTS`
 3. 先完成单节点环回或双节点最小系统仿真，再扩展到多节点组网验证
 
 ## 详细设计
