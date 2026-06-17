@@ -13,8 +13,7 @@ module node_top #(
     parameter FIFO_DEPTH   = 8192,
     parameter RX_REPORT_FIFO_DEPTH = 2048,
     parameter CLK_FREQ_HZ  = 160_000_000,
-    parameter CONGEST_TIMEOUT_SEC = 5,
-    parameter NUM_PORTS    = 2
+    parameter CONGEST_TIMEOUT_SEC = 5
 ) (
     input  wire        clk,
     input  wire        rst,
