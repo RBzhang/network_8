@@ -36,6 +36,8 @@ module rx_dispatcher #(
     output reg         forward_valid,
     input  wire        forward_ready,
     input  wire        forward_done,
+    input  wire        forward_duplicate,
+    output reg         forward_should_forward,
     output reg  [PORT_W-1:0] forward_rx_port,
     output reg  [7:0]  forward_src_id,
     output reg  [7:0]  forward_dst_id,
@@ -56,7 +58,7 @@ module rx_dispatcher #(
     reg [SCAN_W-1:0] scan_count;
     reg [PORT_W-1:0] active_port;
     reg [15:0] payload_index;
-    reg        local_needs_forward;
+    reg        local_should_deliver;
     reg [15:0] rx_payload_index_r [0:NUM_PORTS-1];
     integer i;
 
@@ -81,7 +83,7 @@ module rx_dispatcher #(
             scan_count <= {SCAN_W{1'b0}};
             active_port <= {PORT_W{1'b0}};
             payload_index <= 16'd0;
-            local_needs_forward <= 1'b0;
+            local_should_deliver <= 1'b0;
             frame_consumed <= {NUM_PORTS{1'b0}};
             app_rx_frame_valid <= 1'b0;
             app_rx_src_id <= 8'd0;
@@ -94,6 +96,7 @@ module rx_dispatcher #(
             liveness_update <= 1'b0;
             liveness_update_src <= 8'd0;
             forward_valid <= 1'b0;
+            forward_should_forward <= 1'b0;
             forward_rx_port <= {PORT_W{1'b0}};
             forward_src_id <= 8'd0;
             forward_dst_id <= 8'd0;
@@ -133,25 +136,16 @@ module rx_dispatcher #(
                         liveness_update <= 1'b1;
                         liveness_update_src <= active_src_id;
 
-                        if (active_dst_id == my_id || (rx_is_broadcast[active_port] && active_len16 != 0)) begin
-                            app_rx_src_id <= active_src_id;
-                            app_rx_dst_id <= active_dst_id;
-                            app_rx_count <= active_count;
-                            app_rx_len16 <= active_len16;
-                            app_rx_frame_valid <= 1'b1;
-                            local_needs_forward <= rx_is_broadcast[active_port] && (active_len16 != 0);
-                            payload_index <= 16'd0;
-                            rx_payload_index_r[active_port] <= 16'd0;
-                            st <= S_LOCAL_HDR;
-                        end else begin
-                            forward_rx_port <= active_port;
-                            forward_src_id <= active_src_id;
-                            forward_dst_id <= active_dst_id;
-                            forward_count <= active_count;
-                            forward_len16 <= active_len16;
-                            forward_valid <= 1'b1;
-                            st <= S_FWD_REQ;
-                        end
+                        local_should_deliver <= (active_dst_id == my_id) ||
+                                                (rx_is_broadcast[active_port] && active_len16 != 0);
+                        forward_rx_port <= active_port;
+                        forward_src_id <= active_src_id;
+                        forward_dst_id <= active_dst_id;
+                        forward_count <= active_count;
+                        forward_len16 <= active_len16;
+                        forward_should_forward <= (active_dst_id != my_id) || rx_is_broadcast[active_port];
+                        forward_valid <= 1'b1;
+                        st <= S_FWD_REQ;
                     end
                 end
 
@@ -159,18 +153,8 @@ module rx_dispatcher #(
                     if (app_rx_frame_valid && app_rx_frame_ready) begin
                         app_rx_frame_valid <= 1'b0;
                         if (app_rx_len16 == 0) begin
-                            if (local_needs_forward) begin
-                                forward_rx_port <= active_port;
-                                forward_src_id <= active_src_id;
-                                forward_dst_id <= active_dst_id;
-                                forward_count <= active_count;
-                                forward_len16 <= active_len16;
-                                forward_valid <= 1'b1;
-                                st <= S_FWD_REQ;
-                            end else begin
-                                frame_consumed[active_port] <= 1'b1;
-                                st <= S_POLL;
-                            end
+                            frame_consumed[active_port] <= 1'b1;
+                            st <= S_POLL;
                         end else begin
                             payload_index <= 16'd0;
                             rx_payload_index_r[active_port] <= 16'd0;
@@ -190,18 +174,8 @@ module rx_dispatcher #(
                     if (app_rx_payload_valid && app_rx_payload_ready) begin
                         app_rx_payload_valid <= 1'b0;
                         if (payload_index == app_rx_len16 - 1) begin
-                            if (local_needs_forward) begin
-                                forward_rx_port <= active_port;
-                                forward_src_id <= active_src_id;
-                                forward_dst_id <= active_dst_id;
-                                forward_count <= active_count;
-                                forward_len16 <= active_len16;
-                                forward_valid <= 1'b1;
-                                st <= S_FWD_REQ;
-                            end else begin
-                                frame_consumed[active_port] <= 1'b1;
-                                st <= S_POLL;
-                            end
+                            frame_consumed[active_port] <= 1'b1;
+                            st <= S_POLL;
                         end else begin
                             payload_index <= payload_index + 1'b1;
                             rx_payload_index_r[active_port] <= payload_index + 1'b1;
@@ -219,8 +193,19 @@ module rx_dispatcher #(
 
                 S_FWD_WAIT: begin
                     if (forward_done) begin
-                        frame_consumed[active_port] <= 1'b1;
-                        st <= S_POLL;
+                        if (forward_duplicate || !local_should_deliver) begin
+                            frame_consumed[active_port] <= 1'b1;
+                            st <= S_POLL;
+                        end else begin
+                            app_rx_src_id <= active_src_id;
+                            app_rx_dst_id <= active_dst_id;
+                            app_rx_count <= active_count;
+                            app_rx_len16 <= active_len16;
+                            app_rx_frame_valid <= 1'b1;
+                            payload_index <= 16'd0;
+                            rx_payload_index_r[active_port] <= 16'd0;
+                            st <= S_LOCAL_HDR;
+                        end
                     end
                 end
 

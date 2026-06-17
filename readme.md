@@ -82,7 +82,7 @@ node.v (兼容性封装，仅实例化 node_top)
 
 ### `frame_rx.v` — 帧接收器
 
-每个端口实例化一个，7 状态 FSM 完成帧同步与校验：
+每个端口实例化一个，8 状态 FSM 完成帧同步与校验：
 
 | 状态 | 功能 |
 |------|------|
@@ -91,6 +91,7 @@ node.v (兼容性封装，仅实例化 node_top)
 | HEADER2 | 提取 `len16`，若 `> MAX_PAYLOAD` 则丢弃回到 HUNT |
 | PAYLOAD | 按 word 读入 payload buffer |
 | CRC | 读取接收端 CRC 值，对本地 CRC 计算执行 finalize |
+| CRC_WAIT | 等待 `crc32_calc` 的时序输出更新 |
 | CHECK | 比较本地 CRC 与接收 CRC，一致则置 `frame_ready=1` |
 | DONE | 等待上层 `frame_consumed` 后释放 |
 
@@ -99,20 +100,21 @@ node.v (兼容性封装，仅实例化 node_top)
 从多端口并行轮询已就绪的帧，按优先级分类处理：
 
 - **SELFCHK**: `srcID == my_id` → 丢弃（自己发出的包绕回）
-- **LOCAL**: `dstID == my_id`（单播命中）→ 通过 `app_rx_*` 接口反馈给上层，不转发
-- **BROADCAST DATA**: `dstID == 0xFF && len16 > 0` → 通过 `app_rx_*` 接口反馈给上层，并继续提交给 `forward_engine` 转发
-- **FORWARD**: `dstID == 0xFF && len16 == 0` 的状态包或其他目标帧 → 发送给 `forward_engine` 进行去重和转发
+- **DEDUP FIRST**: `srcID != my_id` 的帧先提交给 `forward_engine` 查重，重复帧直接丢弃，不上报上层
+- **LOCAL**: 去重命中的新帧若 `dstID == my_id`（单播命中）→ 通过 `app_rx_*` 接口反馈给上层，不转发
+- **BROADCAST DATA**: 去重命中的新帧若 `dstID == 0xFF && len16 > 0` → 先按需转发，再通过 `app_rx_*` 接口反馈给上层
+- **FORWARD**: `dstID == 0xFF && len16 == 0` 的状态包或其他目标帧 → 由 `forward_engine` 去重后转发
 - **LIVENESS**: 任意 CRC 正确且 `srcID != my_id` 的帧都会用 `srcID` 更新生存状态表
 
 6 状态 FSM: `POLL → CLASSIFY → LOCAL_HDR → LOCAL_LOAD → LOCAL_PAY → FWD_REQ → FWD_WAIT`
 
 ### `forward_engine.v` — 转发引擎
 
-接收 `rx_dispatcher` 发来的转发候选，执行去重查询和转发决策：
+接收 `rx_dispatcher` 发来的候选帧，执行去重查询和按需转发决策：
 
 - S_IDLE: 等待候选帧
 - S_LOOKUP: 查询 `dedup_table`，检查 `(srcID, count)` 是否已存在
-- S_DECIDE: 已存在则丢弃，未命中则插入去重表并提交转发请求
+- S_DECIDE: 已存在则丢弃，未命中则插入去重表；需要转发的帧再提交转发请求
 - S_REQ: 等待 `tx_arbiter` 接受
 
 ### `tx_arbiter.v` — 发送仲裁器
@@ -134,16 +136,19 @@ node.v (兼容性封装，仅实例化 node_top)
 - 每写入一个 word 同时送入 CRC32 计算引擎
 - payload 读取使用内部 `payload_index`，它只是本地 buffer/RAM 索引，不是协议帧字段
 - 内部实例化 `crc32_calc` 用于在线 CRC 计算
-- 7 状态 FSM: `IDLE → SYNC → HEADER1 → HEADER2 → PAYLOAD → CRC → CRC_WAIT → DONE`
+- 8 状态 FSM: `IDLE → SYNC → HEADER1 → HEADER2 → PAYLOAD → CRC → CRC_WAIT → DONE`
 
 ### `local_packet_generator.v` — 本地包生成器
 
 生成两种本地帧描述符：
 
-1. **数据帧**: 当上层 `app_frame_valid && app_frame_ready` 时，锁存 `app_dst_id` / `app_len16` / `app_payload_data`，生成帧描述符
+1. **数据帧**: 当上层 `app_frame_valid && app_frame_ready` 时，锁存 `app_dst_id` / `app_len16`，生成帧描述符；payload 通过 `app_payload_addr` 逐 word 读取 `app_payload_data`
 2. **探活帧**: 无上层数据帧请求时，每秒自动生成一个 `dstID=0xFF, len16=0` 的广播状态包
 
 - 数据帧优先级高于探活帧
+- `app_frame_accepted` 只表示发送请求描述符已锁存，不表示 payload 已经读完
+- `app_frame_done` 是本地 app 数据帧完成信号；上层必须等到它置位后才能释放或改写本次 payload RAM
+- `app_len16 > MAX_PAYLOAD` 时会被截断到 `MAX_PAYLOAD`，默认即 256 words
 - `network_congested=1` 时压低 `app_frame_ready`，禁止上层继续写入新数据包
 - 维护 `count` 计数器（数据帧和探活帧共用）
 
@@ -173,7 +178,7 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
 
 ### `async_fifo.v` — 异步 FIFO
 
-跨时钟域 FIFO 包装器：
+跨时钟域 FIFO 包装器，采用 **First Word Fall Through (FWFT)** 模式：
 
 - `USE_IP=1`（默认）: 实例化 Vivado `fifo_generator_32_512` IP 核
 - `USE_IP=0`（仿真）: 纯 RTL 行为模型（双口 RAM + 格雷码指针 + 两级同步器）
@@ -187,7 +192,7 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
 
 ```
 光模块 RX → async_fifo (rx_clk* → clk) → frame_rx → rx_dispatcher
-                                                         ├── 本地单播/广播数据包 → app_rx_* 上层接口
+                                                         ├── 去重后本地单播/广播数据包 → app_rx_* 上层接口
                                                          ├── 存活性更新 → liveness_table
                                                          └── 需转发 → forward_engine (去重)
                                                                         └── tx_arbiter (仲裁)
