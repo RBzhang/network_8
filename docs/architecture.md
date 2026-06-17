@@ -34,6 +34,7 @@ module node (
     input         app_frame_valid,   // 上层请求发送数据帧
     output        app_frame_ready,
     output        app_frame_accepted,
+    output        app_frame_done,
     input  [7:0]  app_dst_id,
     input  [15:0] app_len16,
     output [15:0] app_payload_addr,
@@ -55,8 +56,8 @@ module node (
 ```
 
 - **node_id_valid / node_id**：`node_id_valid=1` 时将 `node_id` 的 8bit 幅值锁存为本节点 ID。模块只响应第一次有效脉冲，后续脉冲全部忽略；锁存前 RX、TX、调度、探活等逻辑保持空闲并忽略所有数据流。
-- **app_frame\***：上层发送数据帧接口。`app_frame_valid && app_frame_ready` 时锁存目的节点和长度，随后模块按 `app_payload_addr` 逐 word 读取 `app_payload_data` 并封装成协议帧发送。`network_congested` 为高时 `app_frame_ready` 被压低，上层应停止写入新数据包。若无上层数据帧请求，模块按周期发送生存状态帧。`app_payload_addr` 只是本地 payload RAM 的读索引，不属于帧格式字段。
-- **app_rx\***：上层接收数据帧接口。本节点收到 `dstID == 本机ID` 的单播数据帧，或收到 `dstID == 0xFF && len16 > 0` 的广播数据帧时，先用 `app_rx_frame_valid` 上报 header，再用 `app_rx_payload_valid` 按 word 上报 payload；若该帧是广播数据包，则完成本地上报后再继续转发。上层通过 `app_rx_frame_ready` 和 `app_rx_payload_ready` 分别完成 header/payload 握手。`app_rx_payload_addr` 同样只是本地上报 payload 的 word 索引，不进入网络帧。
+- **app_frame\***：上层发送数据帧接口。`app_frame_valid && app_frame_ready` 时锁存目的节点和长度，`app_frame_accepted` 给出单拍确认；此时 payload 还没有读完，上层必须保持 payload RAM 内容稳定。随后模块按 `app_payload_addr` 逐 word 读取 `app_payload_data` 并封装成协议帧发送，直到 `app_frame_done` 单拍置位后，上层才可以释放或改写本次 payload RAM。`app_len16 > MAX_PAYLOAD` 时会被截断到 `MAX_PAYLOAD`（默认 256 words）。`network_congested` 为高或上一帧 payload 尚未发送完成时，`app_frame_ready` 被压低，上层应停止写入新数据包。若无上层数据帧请求，模块按周期发送生存状态帧。`app_payload_addr` 只是本地 payload RAM 的读索引，不属于帧格式字段。
+- **app_rx\***：上层接收数据帧接口。本节点收到 CRC 正确且去重命中的新数据帧后，若 `dstID == 本机ID`，或 `dstID == 0xFF && len16 > 0`，先用 `app_rx_frame_valid` 上报 header，再用 `app_rx_payload_valid` 按 word 上报 payload；重复帧不会上报给上层。广播数据包在去重后按需转发，并且只对新帧执行本地上报。上层通过 `app_rx_frame_ready` 和 `app_rx_payload_ready` 分别完成 header/payload 握手。`app_rx_payload_addr` 同样只是本地上报 payload 的 word 索引，不进入网络帧。
 
 节点内部处理逻辑运行在 **160 MHz** 主时钟域。每个光模块独占一组**异步 RX FIFO 和异步 TX FIFO**（跨时钟域）；端口数据在各自的 `rx_clk*` / `tx_clk*` 域采样和输出，内部调度、去重和判定仍在 `clk` 域完成。详见 [FIFO 架构](#10-fifo-架构与并行处理)。
 
@@ -107,6 +108,7 @@ module node (
 - **reserved** (Word 2 [15:0])：16bit 保留字段，填充 0。
 - **payload**：变长数据（0 ~ 256 words），从 Word 3 开始。
 - **CRC32**：32bit (1 word)，覆盖从 Word 1 到 payload 末尾的全部字段（不含同步头）。接收端校验不通过则整包丢弃。
+- 接收端读到 CRC word 后先拉高 `crc_final`，等待一拍让 `crc32_calc.crc_out` 更新，再比较本地 CRC 与接收 CRC。
 
 ### 帧边界保护
 
@@ -127,7 +129,7 @@ module node (
 ### 6.1 时序
 
 - 数据帧是否发送由上层 `app_frame_valid` 控制，目的节点、payload 长度和 payload 内容均由上层提供。
-- 调度器空闲且 `app_frame_valid && app_frame_ready` 时，模块锁存上层数据帧请求，并将该帧写入所有端口的 TX FIFO，由各端口按队列顺序发出。
+- 调度器空闲且 `app_frame_valid && app_frame_ready` 时，模块锁存上层数据帧请求，并将该帧写入所有端口的 TX FIFO，由各端口按队列顺序发出。`app_frame_accepted` 只表示请求描述符已锁存；`app_frame_done` 才表示 payload 读取和本地帧发送已完成。
 - 写入 TX FIFO 前，调度器使用 FIFO IP 的 `wr_data_count` 在写时钟域检查整帧剩余空间。整帧所需 word 数为 `4 + len16`（同步头、两字 header、payload、CRC）；目标端口空间不足时，调度器保持请求并拉高 `network_congested`，不写入半帧。转发帧阻塞超过 5 秒后丢弃当前转发帧并释放接收 buffer。
 - 没有上层数据帧请求时，节点固定**每 1 秒**产生一个零 payload 的广播状态包，用于生存状态探活。
 - 节点自己产生的数据帧和状态包共用 `count` 字段，发送时 `count` 自增 1。
@@ -172,20 +174,18 @@ flowchart TD
     CRC -- 否 --> E0["丢弃（校验失败）"]
     CRC -- 是 --> S{"srcID == 本机ID ?"}
     S -- 是（自己发出的包绕回）--> E1["丢弃，不转发"]
-    S -- 否 --> C{"dstID == 本机ID ?"}
+    S -- 否 --> DUP{"该包已收到过 ?<br/>(srcID + count 相同)"}
+    DUP -- 是 --> E3["丢弃，不上报"]
+    DUP -- 否 --> INS["记录到去重表"]
+    INS --> C{"dstID == 本机ID ?"}
     C -- 是 --> A["本地处理<br/>上报 app_rx_*"]
     C -- 否 --> B{"dstID == 0xFF ?"}
-    B -- 否 --> SKIP["不处理，继续判断"]
+    B -- 否 --> FWD["向其他光模块转发<br/>（除接收端口外）"]
     B -- 是 --> L{"len16 > 0 ?"}
-    L -- 是（广播数据包）--> BA["本地处理<br/>上报 app_rx_*"]
-    L -- 否（广播状态包）--> DUP1["检查去重"]
+    L -- 是（广播数据包）--> BF["向其他光模块转发<br/>（除接收端口外）"]
+    BF --> BA["本地处理<br/>上报 app_rx_*"]
+    L -- 否（广播状态包）--> FWD
     A --> E2["终结，不转发"]
-    BA --> DUP1
-    SKIP --> DUP2["检查去重"]
-    DUP1 --> DUP{"该包已收到过 ?<br/>(srcID + count 相同)"}
-    DUP2 --> DUP
-    DUP -- 是 --> E3["丢弃"]
-    DUP -- 否 --> FWD["记录到去重表<br/>向其他光模块转发<br/>（除接收端口外）"]
 ```
 
 ### 规则详解
@@ -194,17 +194,19 @@ flowchart TD
 |------|------|------|
 | ⓪ | CRC32 校验失败 | **丢弃**整帧，不做任何后续处理 |
 | ① | `srcID == 本机ID` | **丢弃，不转发**。自己发出的包绕环一周回到自己时终止 |
-| ② | `dstID == 本机ID`（单播命中） | **本地处理**，将数据帧 header 和 payload 反馈给上层接口，然后**终结，不转发** |
-| ③ | `dstID == 0xFF && len16 == 0`（广播状态包） | 更新生存状态，然后**继续转发**到其他光模块；不通过 `app_rx_*` 上报 |
-| ④ | `dstID == 0xFF && len16 > 0`（广播数据包） | **本地处理**，通过 `app_rx_*` 上报 header 和 payload，然后**继续转发**到其他光模块 |
-| ⑤ | `dstID != 本机ID 且 != 0xFF` | 不处理 payload，检查去重后转发 |
-| ⑥ | `(srcID, count)` 重复 | **丢弃**，不处理，不转发 |
+| ② | `(srcID, count)` 重复 | **丢弃**，不转发，也不通过 `app_rx_*` 上报 |
+| ③ | `dstID == 本机ID`（单播命中）且不是重复帧 | **本地处理**，将数据帧 header 和 payload 反馈给上层接口，然后**终结，不转发** |
+| ④ | `dstID == 0xFF && len16 == 0`（广播状态包）且不是重复帧 | 更新生存状态，然后**继续转发**到其他光模块；不通过 `app_rx_*` 上报 |
+| ⑤ | `dstID == 0xFF && len16 > 0`（广播数据包）且不是重复帧 | **继续转发**到其他光模块，并通过 `app_rx_*` 上报 header 和 payload |
+| ⑥ | `dstID != 本机ID 且 != 0xFF` 且不是重复帧 | 不处理 payload，转发到其他光模块 |
 
 > **关键**：CRC 校验在包头解析之后、决策之前执行；校验不通过直接丢弃，确保后续去重/转发链路上的数据完整性。
 >
 > **关键**：规则 ① 解决了包无限循环的问题，源节点识别自己发出的包并终结它，形成天然的 TTL。
 >
-> **关键**：只要收到 CRC 正确且 `srcID != 本机ID` 的帧，都会用 `srcID` 更新生存状态窗口；单播或广播数据帧也可用于判定源节点存活。`dstID == 本机ID` 的单播数据帧和 `dstID == 0xFF && len16 > 0` 的广播数据帧都会通过 `app_rx_*` 接口反馈给上层。
+> **关键**：去重在本地上报之前执行。环网中同一包从两个方向到达目标节点时，只有第一个 `(srcID, count)` 新帧会通过 `app_rx_*` 反馈给上层，后到达的重复帧直接丢弃。
+>
+> **关键**：只要收到 CRC 正确且 `srcID != 本机ID` 的帧，都会用 `srcID` 更新生存状态窗口；单播或广播数据帧也可用于判定源节点存活。`dstID == 本机ID` 的单播数据帧和 `dstID == 0xFF && len16 > 0` 的广播数据帧在去重命中新帧后通过 `app_rx_*` 接口反馈给上层。
 
 ## 8. 去重机制
 
@@ -294,7 +296,7 @@ graph TB
 ### 10.3 统一调度
 
 - **统一调度器**轮询所有端口的帧接收状态机，按 Round-Robin 顺序依次取出已就绪的帧。
-- 取出后执行：srcID 自检 → dstID 匹配 → 去重查询 → 决策（本地处理 / 转发 / 丢弃）。
+- 取出后执行：srcID 自检 → 去重查询/插入 → dstID 匹配 → 决策（本地处理 / 转发 / 丢弃）。
 - 需转发的帧写入对应端口状态机的发送 buffer，由状态机写入异步 TX FIFO（排除接收端口）。
 - 自己的帧产生时，写入所有端口状态机的发送 buffer。
 
@@ -324,6 +326,7 @@ flowchart LR
 
 - **帧接收状态机 / 调度器**运行在 160 MHz 主时钟域。
 - **异步 RX/TX FIFO** 由 `sources_1/ip/fifo_generator_32_512/fifo_generator_32_512.xci` 对应的 Vivado FIFO IP 实现，完成光模块接口时钟域与 160 MHz 主时钟域之间的跨时钟域转换。
+- 所有异步 FIFO 均配置为 **First Word Fall Through (FWFT)** 模式，即读使能有效后数据在下一个时钟周期即可读出，无需额外读延迟。
 - 未来扩展更多光模块时，每新增一个光模块即新增一对异步 FIFO 和一个帧接收状态机。
 
 ## 11. 复位行为

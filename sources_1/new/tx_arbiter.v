@@ -17,6 +17,8 @@ module tx_arbiter #(
     input  wire [7:0] my_id,
     input  wire       local_req,
     output reg        local_accept,
+    input  wire       local_is_app,
+    output reg        local_app_done,
     input  wire [7:0] local_dst_id,
     input  wire [15:0] local_count,
     input  wire [15:0] local_len16,
@@ -55,6 +57,7 @@ module tx_arbiter #(
     reg [2:0] st;
     reg [NUM_PORTS-1:0] active_mask;
     reg active_forward;
+    reg active_local_is_app;
     reg [CONGEST_TIMER_W-1:0] congest_count;
     integer i;
 
@@ -121,6 +124,7 @@ module tx_arbiter #(
             st <= S_IDLE;
             active_mask <= {NUM_PORTS{1'b0}};
             active_forward <= 1'b0;
+            active_local_is_app <= 1'b0;
             congest_count <= {CONGEST_TIMER_W{1'b0}};
             tx_start <= {NUM_PORTS{1'b0}};
             tx_src_id <= 8'd0;
@@ -130,10 +134,12 @@ module tx_arbiter #(
             tx_payload_is_forward <= 1'b0;
             tx_forward_payload_port <= {PORT_W{1'b0}};
             local_accept <= 1'b0;
+            local_app_done <= 1'b0;
             forward_accept <= 1'b0;
         end else begin
             tx_start <= {NUM_PORTS{1'b0}};
             local_accept <= 1'b0;
+            local_app_done <= 1'b0;
             forward_accept <= 1'b0;
 
             case (st)
@@ -148,6 +154,7 @@ module tx_arbiter #(
                         tx_payload_is_forward <= 1'b1;
                         tx_forward_payload_port <= forward_payload_port;
                         active_forward <= 1'b1;
+                        active_local_is_app <= 1'b0;
                         if (forward_port_mask == {NUM_PORTS{1'b0}}) begin
                             forward_accept <= 1'b1;
                             active_mask <= {NUM_PORTS{1'b0}};
@@ -168,6 +175,7 @@ module tx_arbiter #(
                         tx_payload_is_forward <= 1'b0;
                         tx_forward_payload_port <= {PORT_W{1'b0}};
                         active_forward <= 1'b0;
+                        active_local_is_app <= local_is_app;
                         if (!local_targets_room) begin
                             congest_count <= {CONGEST_TIMER_W{1'b0}};
                             st <= S_WAIT_LOCAL_ROOM;
@@ -186,6 +194,9 @@ module tx_arbiter #(
                             forward_accept <= 1'b1;
                             st <= S_WAIT_FWD_ACK;
                         end else begin
+                            if (active_local_is_app)
+                                local_app_done <= 1'b1;
+                            active_local_is_app <= 1'b0;
                             st <= S_IDLE;
                         end
                     end

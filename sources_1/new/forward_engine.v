@@ -18,6 +18,7 @@ module forward_engine #(
     input  wire [7:0]  candidate_dst_id,
     input  wire [15:0] candidate_count,
     input  wire [15:0] candidate_len16,
+    input  wire        candidate_should_forward,
     output reg         forward_req,
     input  wire        forward_accept,
     output reg  [NUM_PORTS-1:0] forward_port_mask,
@@ -25,7 +26,8 @@ module forward_engine #(
     output reg  [7:0]  forward_dst_id,
     output reg  [15:0] forward_count,
     output reg  [15:0] forward_len16,
-    output reg  [PORT_W-1:0] payload_port
+    output reg  [PORT_W-1:0] payload_port,
+    output reg         candidate_duplicate
 );
     localparam [1:0] S_IDLE   = 2'd0;
     localparam [1:0] S_LOOKUP = 2'd1;
@@ -58,6 +60,7 @@ module forward_engine #(
         if (rst) begin
             st <= S_IDLE;
             candidate_done <= 1'b0;
+            candidate_duplicate <= 1'b0;
             forward_req <= 1'b0;
             forward_port_mask <= {NUM_PORTS{1'b0}};
             forward_src_id <= 8'd0;
@@ -71,6 +74,7 @@ module forward_engine #(
             dedup_count <= 16'd0;
         end else begin
             candidate_done <= 1'b0;
+            candidate_duplicate <= 1'b0;
             dedup_lookup <= 1'b0;
             dedup_insert <= 1'b0;
 
@@ -98,6 +102,11 @@ module forward_engine #(
 
                 S_DECIDE: begin
                     if (dedup_found) begin
+                        candidate_done <= 1'b1;
+                        candidate_duplicate <= 1'b1;
+                        st <= S_IDLE;
+                    end else if (!candidate_should_forward) begin
+                        dedup_insert <= 1'b1;
                         candidate_done <= 1'b1;
                         st <= S_IDLE;
                     end else begin

@@ -30,6 +30,7 @@ module node_top #(
     input  wire        app_frame_valid,
     output wire        app_frame_ready,
     output wire        app_frame_accepted,
+    output wire        app_frame_done,
     input  wire [7:0]  app_dst_id,
     input  wire [15:0] app_len16,
     output wire [15:0] app_payload_addr,
@@ -180,6 +181,8 @@ module node_top #(
     wire       forward_candidate_valid;
     wire       forward_candidate_ready;
     wire       forward_candidate_done;
+    wire       forward_candidate_duplicate;
+    wire       forward_candidate_should_forward;
     wire [PORT_W-1:0] forward_candidate_port;
     wire [7:0]        forward_candidate_src;
     wire [7:0]        forward_candidate_dst;
@@ -221,6 +224,8 @@ module node_top #(
         .forward_valid(forward_candidate_valid),
         .forward_ready(forward_candidate_ready),
         .forward_done(forward_candidate_done),
+        .forward_duplicate(forward_candidate_duplicate),
+        .forward_should_forward(forward_candidate_should_forward),
         .forward_rx_port(forward_candidate_port),
         .forward_src_id(forward_candidate_src),
         .forward_dst_id(forward_candidate_dst),
@@ -250,6 +255,8 @@ module node_top #(
 
     wire       local_req;
     wire       local_accept;
+    wire       local_is_app;
+    wire       local_app_done;
     wire [7:0] local_dst_id;
     wire [15:0] local_count;
     wire [15:0] local_len16;
@@ -265,10 +272,13 @@ module node_top #(
         .app_frame_valid(app_frame_valid),
         .app_frame_ready(app_frame_ready),
         .app_frame_accepted(app_frame_accepted),
+        .app_frame_done(app_frame_done),
         .app_dst_id(app_dst_id),
         .app_len16(app_len16),
         .packet_req(local_req),
         .packet_accept(local_accept),
+        .packet_app_done(local_app_done),
+        .packet_is_app(local_is_app),
         .packet_dst_id(local_dst_id),
         .packet_count(local_count),
         .packet_len16(local_len16)
@@ -297,6 +307,7 @@ module node_top #(
         .candidate_dst_id(forward_candidate_dst),
         .candidate_count(forward_candidate_count),
         .candidate_len16(forward_candidate_len),
+        .candidate_should_forward(forward_candidate_should_forward),
         .forward_req(forward_req),
         .forward_accept(forward_accept),
         .forward_port_mask(forward_port_mask),
@@ -304,7 +315,8 @@ module node_top #(
         .forward_dst_id(forward_dst_id),
         .forward_count(forward_count),
         .forward_len16(forward_len16),
-        .payload_port(forward_payload_port)
+        .payload_port(forward_payload_port),
+        .candidate_duplicate(forward_candidate_duplicate)
     );
 
     wire [NUM_PORTS-1:0] tx_start;
@@ -331,6 +343,8 @@ module node_top #(
         .my_id(my_id),
         .local_req(local_req),
         .local_accept(local_accept),
+        .local_is_app(local_is_app),
+        .local_app_done(local_app_done),
         .local_dst_id(local_dst_id),
         .local_count(local_count),
         .local_len16(local_len16),

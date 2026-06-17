@@ -29,7 +29,7 @@ module frame_rx #(
     input  wire        frame_consumed
 );
     localparam [2:0] HUNT = 0, HEADER1 = 1, HEADER2 = 2, PAYLOAD = 3,
-                     CRC = 4, CHECK = 5, DONE = 6;
+                     CRC = 4, CRC_WAIT = 5, CHECK = 6, DONE = 7;
 
     reg [2:0]  st;
     reg [15:0] wi, tlen;
@@ -44,7 +44,7 @@ module frame_rx #(
     localparam integer CONGEST_TIMEOUT_CYCLES = CLK_FREQ_HZ * CONGEST_TIMEOUT_SEC;
     localparam integer CONGEST_TIMER_W = (CONGEST_TIMEOUT_CYCLES <= 1) ? 1 : $clog2(CONGEST_TIMEOUT_CYCLES + 1);
     reg [CONGEST_TIMER_W-1:0] pause_count;
-    wire in_partial_frame = (st != HUNT) && (st != CHECK) && (st != DONE);
+    wire in_partial_frame = (st != HUNT) && (st != CRC_WAIT) && (st != CHECK) && (st != DONE);
 
     crc32_calc u_crc (
         .clk(clk), .rst(rst),
@@ -52,7 +52,7 @@ module frame_rx #(
         .finalize(crc_final), .crc_out(crc_res)
     );
 
-    assign fifo_rd_en = !rx_pause && (st != CHECK && st != DONE);
+    assign fifo_rd_en = !rx_pause && (st != CRC_WAIT) && (st != CHECK) && (st != DONE);
     assign rx_payload = (st == DONE && frame_ready) ? buff[payload_index] : 32'd0;
 
     always @(posedge clk) begin
@@ -122,8 +122,12 @@ module frame_rx #(
                     if (!fifo_empty) begin
                         crc_rcv <= fifo_dout;
                         crc_final <= 1;
-                        st <= CHECK;
+                        st <= CRC_WAIT;
                     end
+                end
+
+                CRC_WAIT: begin
+                        st <= CHECK;
                 end
 
                 CHECK: begin
