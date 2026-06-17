@@ -4,9 +4,11 @@
 // In Vivado synthesis this instantiates the FIFO IP from:
 //   sources_1/ip/fifo_generator_32_512/fifo_generator_32_512.xci
 // The behavioral branch is kept for local lint/simulation when USE_IP=0.
+// REQUIRED: fifo_generator_32_512 must be configured as FWFT.
+// dout is valid whenever empty == 0.
 //------------------------------------------------------------------------------
 module async_fifo #(
-    parameter DEPTH  = 512,
+    parameter DEPTH  = 8192,
     parameter WIDTH  = 32,
     parameter USE_IP = 1,
     parameter ADDR_W  = (DEPTH <= 1) ? 1 : $clog2(DEPTH),

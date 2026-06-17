@@ -7,7 +7,7 @@
 - 以 `node_top.v` 为核心连线顶层，`node.v` 为兼容性封装，建模双端口光互联节点。
 - 支持单播数据包、广播数据包与广播状态包。
 - 使用同步头、长度字段和 CRC32 完成帧同步、边界保护和完整性校验。
-- 通过去重表抑制环网重复包，通过滑动窗口维护节点在线状态。
+- 通过上报/转发两张去重表分别抑制重复上报和重复转发，通过滑动窗口维护节点在线状态。
 - 采用模块化架构：模块按功能边界拆分，各自维护独立的轻量 FSM，通过标准握手接口互联。
 
 ## 目录结构
@@ -31,11 +31,12 @@ node.v (兼容性封装，仅实例化 node_top)
         │     └── async_fifo.v ×4    — 每端口 RX/TX 各一个异步 FIFO
         ├── frame_rx.v ×NUM_PORTS    — 每端口独立帧接收状态机
         ├── rx_dispatcher.v          — 帧分类与本地分发
+        ├── rx_report_fifo.v         — 接收上报同步 FIFO + app_rx 读出重组
         ├── liveness_timer.v         — 1 秒定时器
         ├── liveness_table.v         — 滑动窗口生存状态表
         ├── local_packet_generator.v — 本地帧描述符生成（数据包/探活包）
-        ├── forward_engine.v         — 去重 + 转发决策
-        │     └── dedup_table.v      — 去重表
+        ├── forward_engine.v         — 转发去重 + 转发决策
+        │     └── dedup_table.v      — 上报/转发去重表复用实现
         ├── tx_arbiter.v             — 本地包/转发包仲裁
         └── frame_tx.v ×NUM_PORTS    — 每端口帧发送状态机
               └── crc32_calc.v       — CRC32 计算引擎（共享实例）
@@ -54,8 +55,9 @@ node.v (兼容性封装，仅实例化 node_top)
 | `MAX_PAYLOAD` | `256` | 最大 payload（words） |
 | `LIVENESS_WIN` | `5` | 存活滑动窗口宽度 |
 | `NODE_COUNT` | `255` | 最大节点数 |
-| `DEDUP_DEPTH` | `64` | 去重表深度 |
-| `FIFO_DEPTH` | `512` | 异步 FIFO 深度 |
+| `DEDUP_DEPTH` | `64` | 上报去重表和转发去重表深度 |
+| `FIFO_DEPTH` | `8192` | 异步 FIFO 深度 |
+| `RX_REPORT_FIFO_DEPTH` | `2048` | 接收上报同步 FIFO 深度 |
 | `CLK_FREQ_HZ` | `160_000_000` | 主时钟频率 |
 | `CONGEST_TIMEOUT_SEC` | `5` | 拥塞阻塞超时秒数 |
 | `NUM_PORTS` | `2` | 光模块端口数 |
@@ -95,27 +97,31 @@ node.v (兼容性封装，仅实例化 node_top)
 | CHECK | 比较本地 CRC 与接收 CRC，一致则置 `frame_ready=1` |
 | DONE | 等待上层 `frame_consumed` 后释放 |
 
-### `rx_dispatcher.v` — 帧分类与分发
+### `rx_dispatcher.v` — 帧分类与本地分发
 
-从多端口并行轮询已就绪的帧，按优先级分类处理：
+从多端口 Round-Robin 轮询已就绪的帧，按优先级分类处理：
 
-- **SELFCHK**: `srcID == my_id` → 丢弃（自己发出的包绕回）
-- **DEDUP FIRST**: `srcID != my_id` 的帧先提交给 `forward_engine` 查重，重复帧直接丢弃，不上报上层
-- **LOCAL**: 去重命中的新帧若 `dstID == my_id`（单播命中）→ 通过 `app_rx_*` 接口反馈给上层，不转发
-- **BROADCAST DATA**: 去重命中的新帧若 `dstID == 0xFF && len16 > 0` → 先按需转发，再通过 `app_rx_*` 接口反馈给上层
-- **FORWARD**: `dstID == 0xFF && len16 == 0` 的状态包或其他目标帧 → 由 `forward_engine` 去重后转发
+- **SELFCHK**: `srcID == my_id` → 丢弃（自己发出的包绕回），不走后续去重路径
 - **LIVENESS**: 任意 CRC 正确且 `srcID != my_id` 的帧都会用 `srcID` 更新生存状态表
+- **REPORT DEDUP**: 对满足 `local_should_deliver` 的帧先查询上报去重表；只有未上报过的 `(srcID,count)` 才写入接收上报同步 FIFO，完整写入后再插入上报去重表
+- **FORWARD DEDUP**: `srcID != my_id` 的帧全部提交给 `forward_engine` 查询转发去重表；已经成功转发过的帧不再转发
+- **LOCAL DELIVERY**: 未上报过的新帧且满足 `local_should_deliver` 条件（`dstID == my_id` 或 `dstID == 0xFF && len16 > 0`）→ 先写入接收上报同步 FIFO，再由 FIFO 读侧通过 `app_rx_*` 接口反馈给上层
+- **DISCARD**: 不需要本地上报且不需要转发的帧直接丢弃；重复上报和重复转发分别由两张去重表独立抑制
 
-6 状态 FSM: `POLL → CLASSIFY → LOCAL_HDR → LOCAL_LOAD → LOCAL_PAY → FWD_REQ → FWD_WAIT`
+10 状态 FSM: `POLL → CLASSIFY → (REPORT_LOOKUP → REPORT_DECIDE) → FWD_REQ → FWD_WAIT → (LOCAL_ROOM → LOCAL_HDR0 → LOCAL_HDR1 → LOCAL_PAY) / POLL`
 
-### `forward_engine.v` — 转发引擎
+### `forward_engine.v` — 转发去重与转发引擎
 
-接收 `rx_dispatcher` 发来的候选帧，执行去重查询和按需转发决策：
+所有非本机源帧的**转发去重入口**，只判断该帧是否已经成功转发过：
 
-- S_IDLE: 等待候选帧
-- S_LOOKUP: 查询 `dedup_table`，检查 `(srcID, count)` 是否已存在
-- S_DECIDE: 已存在则丢弃，未命中则插入去重表；需要转发的帧再提交转发请求
-- S_REQ: 等待 `tx_arbiter` 接受
+- S_IDLE: 等待候选帧，接受 `rx_dispatcher` 发来的候选
+- S_LOOKUP: 查询转发去重表，检查 `(srcID, count)` 是否已成功转发过
+- S_DECIDE: 去重决策
+  - 已转发过：置 `candidate_duplicate=1`，本次不再转发
+  - 未转发过且无需转发（`!candidate_should_forward`）：置 `candidate_done`，不插入转发去重表
+  - 未转发过且需要转发：提交 `forward_req` 给 `tx_arbiter`
+- S_REQ: 等待 `tx_arbiter` 返回；只有 `forward_accept=1 && forward_dropped=0` 时才插入转发去重表。若拥塞超时导致 `forward_dropped=1`，该帧不会被标记为已转发，后续重复到达时仍可再次尝试转发
+- 输出 `candidate_duplicate` 表示“转发重复”，不再参与本地上报去重
 
 ### `tx_arbiter.v` — 发送仲裁器
 
@@ -124,7 +130,7 @@ node.v (兼容性封装，仅实例化 node_top)
 - 转发包优先级高于本地包
 - 当所有目标端口 `tx_busy` 均为 0 时，先按 `4 + len16` 计算整帧 word 数，再用目标 TX FIFO 的 `wr_data_count` 检查是否有足够空间
 - 如果目标端口空间不足或 `full=1`，保持待发帧等待空间恢复，不启动 `frame_tx`，避免 TX FIFO 中出现半帧
-- 当发送侧拥塞导致无法接收完整帧时输出 `network_congested`，上层看到高电平应停止写入新数据包；转发帧阻塞超过 5 秒后丢弃
+- 当发送侧拥塞导致无法接收完整帧时输出 `network_congested`，上层看到高电平应停止写入新数据包；转发帧阻塞超过 5 秒后丢弃，并通过 `forward_dropped` 通知 `forward_engine` 不写转发去重表
 - 本地包向所有端口广播；转发包向非接收端口发送
 - 4 状态 FSM: `IDLE → BUSY → WAIT_FWD_ACK / WAIT_LOCAL_ACK`
 
@@ -167,7 +173,10 @@ node.v (兼容性封装，仅实例化 node_top)
 
 ### `dedup_table.v` — 去重表
 
-FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
+FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统实例化两张表：
+
+- **上报去重表**：位于 `rx_dispatcher`，只在本地上报帧完整写入 `rx_report_fifo` 后插入，用于避免同一数据包重复上报给上层
+- **转发去重表**：位于 `forward_engine`，只在转发请求被 `tx_arbiter` 确认为非丢弃完成后插入，用于避免同一数据包重复转发；拥塞超时丢弃不会插入，因此后续重复包仍有机会再次转发
 
 - lookup: 遍历所有有效条目匹配
 - insert: 写指针处写入新条目；表满时覆盖最老条目
@@ -188,18 +197,28 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
 
 同频域 FIFO 参考实现，基于双指针 + 计数器管理空满状态，支持同时读写。
 
+### `rx_report_fifo.v` — 接收上报 FIFO
+
+本地上报数据在送到上层前先进入 `fifo_generator_sync` 同步 FIFO。FIFO 宽度 32bit，深度 2048，配置为 FWFT，并导出 12bit `data_count`。
+
+- 写侧由 `rx_dispatcher` 驱动，格式为 `{srcID,dstID,count}`、`{len16,16'h0}`、payload words
+- 写入前使用 `data_count` 预检查 `2 + len16` 个 word 的完整空间，避免上报 FIFO 中出现半帧
+- 读侧重组 header，继续通过原有 `app_rx_frame_valid/ready` 与 `app_rx_payload_valid/ready` 给上层读取
+- Yosys/仿真可通过 `USE_IP=0` 使用 `sync_fifo` 行为模型；Vivado 默认实例化 `fifo_generator_sync`
+
 ## 数据流概览
 
 ```
 光模块 RX → async_fifo (rx_clk* → clk) → frame_rx → rx_dispatcher
-                                                         ├── 去重后本地单播/广播数据包 → app_rx_* 上层接口
+                                                         ├── self-check (srcID == my_id) → 丢弃
                                                          ├── 存活性更新 → liveness_table
-                                                         └── 需转发 → forward_engine (去重)
-                                                                        └── tx_arbiter (仲裁)
-                                                                              ├── frame_tx ×NUM_PORTS
-                                                                              │     └── async_fifo (clk → tx_clk*) → 光模块 TX
-                                                                              └── local_packet_generator ← app_frame_* 上层接口
-                                                                                    └── liveness_timer (1s tick)
+                                                        ├── local_should_deliver → 上报去重表 → rx_report_fifo → app_rx_* 上层接口
+                                                        └── (srcID != my_id) 全部 → forward_engine (转发去重)
+                                                                                      └── 未转发过 && 需转发 → tx_arbiter (仲裁)
+                                                                                                                     ├── frame_tx ×NUM_PORTS
+                                                                                                                     │     └── async_fifo (clk → tx_clk*) → 光模块 TX
+                                                                                                                     └── local_packet_generator ← app_frame_* 上层接口
+                                                                                                                           └── liveness_timer (1s tick)
 ```
 
 ## 协议摘要
@@ -216,7 +235,8 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键：
 
 - 工程已完成模块化 RTL 拆分，各模块职责清晰、接口标准化
 - `node.v` 为兼容性封装，实际逻辑入口为 `node_top.v`
-- 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`），并使用 IP 的 `wr_data_count` 做 TX 整帧空间预检查
+- 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`），并使用 IP 的 `wr_data_count` 做 TX 整帧空间预检查，该 FIFO IP 已经被设定为 FWFT 模式
+- 接收上报路径使用 Vivado `fifo_generator_sync` 同步 FIFO IP（`sources_1/ip/fifo_generator_sync/fifo_generator_sync.xci`），32bit 宽、FWFT、有 `data_count` 接口；上层 `app_rx_*` 从该 FIFO 的读侧获取数据
 
 ## 使用建议
 

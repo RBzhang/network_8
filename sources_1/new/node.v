@@ -10,7 +10,8 @@ module node #(
     parameter LIVENESS_WIN = 5,
     parameter NODE_COUNT   = 255,
     parameter DEDUP_DEPTH  = 64,
-    parameter FIFO_DEPTH   = 512,
+    parameter FIFO_DEPTH   = 8192,
+    parameter RX_REPORT_FIFO_DEPTH = 2048,
     parameter CLK_FREQ_HZ  = 160_000_000,
     parameter CONGEST_TIMEOUT_SEC = 5,
     parameter NUM_PORTS    = 2
@@ -62,6 +63,7 @@ module node #(
         .NODE_COUNT(NODE_COUNT),
         .DEDUP_DEPTH(DEDUP_DEPTH),
         .FIFO_DEPTH(FIFO_DEPTH),
+        .RX_REPORT_FIFO_DEPTH(RX_REPORT_FIFO_DEPTH),
         .CLK_FREQ_HZ(CLK_FREQ_HZ),
         .CONGEST_TIMEOUT_SEC(CONGEST_TIMEOUT_SEC),
         .NUM_PORTS(NUM_PORTS)

@@ -6,7 +6,7 @@
 module tx_arbiter #(
     parameter NUM_PORTS = 2,
     parameter PORT_W    = (NUM_PORTS <= 1) ? 1 : $clog2(NUM_PORTS),
-    parameter FIFO_DEPTH = 512,
+    parameter FIFO_DEPTH = 8192,
     parameter FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH),
     parameter MAX_PAYLOAD = 256,
     parameter CLK_FREQ_HZ = 160_000_000,
@@ -24,6 +24,7 @@ module tx_arbiter #(
     input  wire [15:0] local_len16,
     input  wire       forward_req,
     output reg        forward_accept,
+    output reg        forward_dropped,
     input  wire [NUM_PORTS-1:0] forward_port_mask,
     input  wire [7:0]  forward_src_id,
     input  wire [7:0]  forward_dst_id,
@@ -136,11 +137,13 @@ module tx_arbiter #(
             local_accept <= 1'b0;
             local_app_done <= 1'b0;
             forward_accept <= 1'b0;
+            forward_dropped <= 1'b0;
         end else begin
             tx_start <= {NUM_PORTS{1'b0}};
             local_accept <= 1'b0;
             local_app_done <= 1'b0;
             forward_accept <= 1'b0;
+            forward_dropped <= 1'b0;
 
             case (st)
                 S_IDLE: begin
@@ -232,6 +235,7 @@ module tx_arbiter #(
                         st <= S_BUSY;
                     end else if (congest_count >= CONGEST_TIMEOUT_CYCLES - 1) begin
                         forward_accept <= 1'b1;
+                        forward_dropped <= 1'b1;
                         active_mask <= {NUM_PORTS{1'b0}};
                         congest_count <= {CONGEST_TIMER_W{1'b0}};
                         st <= S_WAIT_FWD_ACK;

@@ -3,7 +3,7 @@
 // Synchronous FIFO (async FIFO placeholder — replace with Xilinx/Altera IP)
 //------------------------------------------------------------------------------
 module sync_fifo #(
-    parameter DEPTH = 512,
+    parameter DEPTH = 8192,
     parameter WIDTH = 32,
     parameter PTR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH),
     parameter CNT_W = $clog2(DEPTH + 1)

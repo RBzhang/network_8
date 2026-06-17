@@ -10,7 +10,8 @@ module node_top #(
     parameter LIVENESS_WIN = 5,
     parameter NODE_COUNT   = 255,
     parameter DEDUP_DEPTH  = 64,
-    parameter FIFO_DEPTH   = 512,
+    parameter FIFO_DEPTH   = 8192,
+    parameter RX_REPORT_FIFO_DEPTH = 2048,
     parameter CLK_FREQ_HZ  = 160_000_000,
     parameter CONGEST_TIMEOUT_SEC = 5,
     parameter NUM_PORTS    = 2
@@ -56,6 +57,7 @@ module node_top #(
 );
     localparam PORT_W = (NUM_PORTS <= 1) ? 1 : $clog2(NUM_PORTS);
     localparam FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH);
+    localparam RX_REPORT_FIFO_COUNT_W = 12;
 
     wire [7:0] my_id;
     wire       id_locked;
@@ -192,10 +194,17 @@ module node_top #(
     wire       live_update;
     wire [7:0] live_update_src;
     wire       tick_1s;
+    wire       rx_report_wr_en;
+    wire [31:0] rx_report_din;
+    wire       rx_report_full;
+    wire [RX_REPORT_FIFO_COUNT_W-1:0] rx_report_data_count;
 
     rx_dispatcher #(
         .BROADCAST(BROADCAST),
-        .NUM_PORTS(NUM_PORTS)
+        .NUM_PORTS(NUM_PORTS),
+        .RX_REPORT_FIFO_DEPTH(RX_REPORT_FIFO_DEPTH),
+        .RX_REPORT_FIFO_COUNT_W(RX_REPORT_FIFO_COUNT_W),
+        .REPORT_DEDUP_DEPTH(DEDUP_DEPTH)
     ) u_rx_dispatcher (
         .clk(clk),
         .rst(rst || !id_locked),
@@ -209,16 +218,10 @@ module node_top #(
         .rx_payload_index_flat(rx_dispatch_payload_index_flat),
         .rx_payload_data_flat(rx_payload_data_flat),
         .rx_is_broadcast(rx_is_broadcast),
-        .app_rx_frame_valid(app_rx_frame_valid),
-        .app_rx_frame_ready(app_rx_frame_ready),
-        .app_rx_src_id(app_rx_src_id),
-        .app_rx_dst_id(app_rx_dst_id),
-        .app_rx_count(app_rx_count),
-        .app_rx_len16(app_rx_len16),
-        .app_rx_payload_valid(app_rx_payload_valid),
-        .app_rx_payload_ready(app_rx_payload_ready),
-        .app_rx_payload_addr(app_rx_payload_addr),
-        .app_rx_payload_data(app_rx_payload_data),
+        .rx_report_wr_en(rx_report_wr_en),
+        .rx_report_din(rx_report_din),
+        .rx_report_full(rx_report_full),
+        .rx_report_data_count(rx_report_data_count),
         .liveness_update(live_update),
         .liveness_update_src(live_update_src),
         .forward_valid(forward_candidate_valid),
@@ -231,6 +234,28 @@ module node_top #(
         .forward_dst_id(forward_candidate_dst),
         .forward_count(forward_candidate_count),
         .forward_len16(forward_candidate_len)
+    );
+
+    rx_report_fifo #(
+        .DEPTH(RX_REPORT_FIFO_DEPTH),
+        .COUNT_W(RX_REPORT_FIFO_COUNT_W)
+    ) u_rx_report_fifo (
+        .clk(clk),
+        .rst(rst || !id_locked),
+        .wr_en(rx_report_wr_en),
+        .din(rx_report_din),
+        .full(rx_report_full),
+        .data_count(rx_report_data_count),
+        .app_rx_frame_valid(app_rx_frame_valid),
+        .app_rx_frame_ready(app_rx_frame_ready),
+        .app_rx_src_id(app_rx_src_id),
+        .app_rx_dst_id(app_rx_dst_id),
+        .app_rx_count(app_rx_count),
+        .app_rx_len16(app_rx_len16),
+        .app_rx_payload_valid(app_rx_payload_valid),
+        .app_rx_payload_ready(app_rx_payload_ready),
+        .app_rx_payload_addr(app_rx_payload_addr),
+        .app_rx_payload_data(app_rx_payload_data)
     );
 
     liveness_timer #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_liveness_timer (
@@ -286,6 +311,7 @@ module node_top #(
 
     wire       forward_req;
     wire       forward_accept;
+    wire       forward_dropped;
     wire [NUM_PORTS-1:0] forward_port_mask;
     wire [7:0]  forward_src_id;
     wire [7:0]  forward_dst_id;
@@ -310,6 +336,7 @@ module node_top #(
         .candidate_should_forward(forward_candidate_should_forward),
         .forward_req(forward_req),
         .forward_accept(forward_accept),
+        .forward_dropped(forward_dropped),
         .forward_port_mask(forward_port_mask),
         .forward_src_id(forward_src_id),
         .forward_dst_id(forward_dst_id),
@@ -350,6 +377,7 @@ module node_top #(
         .local_len16(local_len16),
         .forward_req(forward_req),
         .forward_accept(forward_accept),
+        .forward_dropped(forward_dropped),
         .forward_port_mask(forward_port_mask),
         .forward_src_id(forward_src_id),
         .forward_dst_id(forward_dst_id),

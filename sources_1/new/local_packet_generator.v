@@ -23,13 +23,15 @@ module local_packet_generator #(
     output reg         packet_is_app,
     output reg  [7:0]  packet_dst_id,
     output reg  [15:0] packet_count,
-    output reg  [15:0] packet_len16
+    output reg  [15:0] packet_len16,
+    output wire app_len_error
 );
     reg [15:0] next_count;
     reg        liveness_pending;
     reg        app_payload_busy;
 
-    assign app_frame_ready = !rst && !tx_congested && !packet_req && !app_payload_busy;
+    assign app_frame_ready = !rst && !tx_congested && !packet_req && !app_payload_busy && (app_len16 <= MAX_PAYLOAD) && (app_len16 > 0);
+    assign app_len_error = app_frame_valid && (app_len16 > MAX_PAYLOAD);
 
     always @(posedge clk) begin
         if (rst) begin

@@ -4,7 +4,7 @@
 // port_cdc: async FIFO boundary and port-domain output registers.
 //------------------------------------------------------------------------------
 module port_cdc #(
-    parameter FIFO_DEPTH = 512,
+    parameter FIFO_DEPTH = 8192,
     parameter NUM_PORTS  = 2,
     parameter FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH)
 ) (
@@ -36,25 +36,33 @@ module port_cdc #(
 );
     reg id_locked_rx0_meta, id_locked_rx0;
     reg id_locked_rx1_meta, id_locked_rx1;
+    reg rst_rx0_meta, rst_rx0_sync;
+    reg rst_rx1_meta, rst_rx1_sync;
+    reg rst_tx0_meta, rst_tx0_sync;
+    reg rst_tx1_meta, rst_tx1_sync;
 
     always @(posedge rx_clk0) begin
-        if (rst) begin
-            id_locked_rx0_meta <= 1'b0;
-            id_locked_rx0 <= 1'b0;
-        end else begin
-            id_locked_rx0_meta <= id_locked;
-            id_locked_rx0 <= id_locked_rx0_meta;
-        end
+        id_locked_rx0_meta <= id_locked;
+        id_locked_rx0 <= id_locked_rx0_meta;
+        rst_rx0_meta <= rst;
+        rst_rx0_sync <= rst_rx0_meta;
     end
 
     always @(posedge rx_clk1) begin
-        if (rst) begin
-            id_locked_rx1_meta <= 1'b0;
-            id_locked_rx1 <= 1'b0;
-        end else begin
-            id_locked_rx1_meta <= id_locked;
-            id_locked_rx1 <= id_locked_rx1_meta;
-        end
+        id_locked_rx1_meta <= id_locked;
+        id_locked_rx1 <= id_locked_rx1_meta;
+        rst_rx1_meta <= rst;
+        rst_rx1_sync <= rst_rx1_meta;
+    end
+
+    always @(posedge tx_clk0) begin
+        rst_tx0_meta <= rst;
+        rst_tx0_sync <= rst_tx0_meta;
+    end
+
+    always @(posedge tx_clk1) begin
+        rst_tx1_meta <= rst;
+        rst_tx1_sync <= rst_tx1_meta;
     end
 
     genvar p;
@@ -65,8 +73,8 @@ module port_cdc #(
 
                 async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx_fifo (
                     .wr_clk(rx_clk0),
-                    .rst(rst),
-                    .wr_en(valid_in0 && id_locked_rx0),
+                    .rst(rst_rx0_sync),
+                    .wr_en(valid_in0 && id_locked_rx0 && !rx_rd_en[p]),
                     .din(in0),
                     .full(rx_full[p]),
                     .wr_data_count(unused_rx_wr_data_count),
@@ -92,8 +100,8 @@ module port_cdc #(
 
                 async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx_fifo (
                     .wr_clk(rx_clk1),
-                    .rst(rst),
-                    .wr_en(valid_in1 && id_locked_rx1),
+                    .rst(rst_rx1_sync),
+                    .wr_en(valid_in1 && id_locked_rx1 && !rx_rd_en[p]),
                     .din(in1),
                     .full(rx_full[p]),
                     .wr_data_count(unused_rx_wr_data_count),
@@ -122,7 +130,7 @@ module port_cdc #(
     reg        valid_out0_r, valid_out1_r;
 
     always @(posedge tx_clk0) begin
-        if (rst) begin
+        if (rst_tx0_sync) begin
             out0_r <= 32'd0;
             valid_out0_r <= 1'b0;
         end else begin
@@ -133,7 +141,7 @@ module port_cdc #(
     end
 
     always @(posedge tx_clk1) begin
-        if (rst) begin
+        if (rst_tx1_sync) begin
             out1_r <= 32'd0;
             valid_out1_r <= 1'b0;
         end else begin
