@@ -65,7 +65,7 @@ module local_packet_generator #(
                 packet_is_app <= 1'b1;
                 packet_dst_id <= app_dst_id;
                 packet_count <= next_count;
-                packet_len16 <= (app_len16 > MAX_PAYLOAD) ? MAX_PAYLOAD : app_len16;
+                packet_len16 <= app_len16;
                 next_count <= next_count + 1'b1;
                 app_payload_busy <= 1'b1;
                 app_frame_accepted <= 1'b1;

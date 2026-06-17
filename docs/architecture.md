@@ -51,15 +51,29 @@ module node (
     output [31:0] app_rx_payload_data,
     output [31:0] out0, out1,        // 光模块 0/1 的 TX 数据
     output        valid_out0, valid_out1,
-    output        network_congested  // TX 拥塞/转发阻塞，高电平时上层停止写包
+    output        network_congested, // TX 拥塞/转发阻塞，高电平时上层停止写包
+    output        app_len_error      // app_len16 超过 MAX_PAYLOAD
 );
 ```
 
 - **node_id_valid / node_id**：`node_id_valid=1` 时将 `node_id` 的 8bit 幅值锁存为本节点 ID。模块只响应第一次有效脉冲，后续脉冲全部忽略；锁存前 RX、TX、调度、探活等逻辑保持空闲并忽略所有数据流。
-- **app_frame\***：上层发送数据帧接口。`app_frame_valid && app_frame_ready` 时锁存目的节点和长度，`app_frame_accepted` 给出单拍确认；此时 payload 还没有读完，上层必须保持 payload RAM 内容稳定。随后模块按 `app_payload_addr` 逐 word 读取 `app_payload_data` 并封装成协议帧发送，直到 `app_frame_done` 单拍置位后，上层才可以释放或改写本次 payload RAM。`app_len16 > MAX_PAYLOAD` 时会被截断到 `MAX_PAYLOAD`（默认 256 words）。`network_congested` 为高或上一帧 payload 尚未发送完成时，`app_frame_ready` 被压低，上层应停止写入新数据包。若无上层数据帧请求，模块按周期发送生存状态帧。`app_payload_addr` 只是本地 payload RAM 的读索引，不属于帧格式字段。
+- **app_frame\***：上层发送数据帧接口。`app_frame_valid && app_frame_ready` 时锁存目的节点和长度，`app_frame_accepted` 给出单拍确认；此时 payload 还没有读完，上层必须保持 payload RAM 内容稳定。随后模块按 `app_payload_addr` 逐 word 读取 `app_payload_data` 并封装成协议帧发送，直到 `app_frame_done` 单拍置位后，上层才可以释放或改写本次 payload RAM。`app_len16 > MAX_PAYLOAD` 时 `app_frame_ready` 保持低电平，同时 `app_len_error=1` 提示上层；已接受的数据帧直接使用 `app_len16` 作为协议 `len16`，不会再做截断。`network_congested` 为高或上一帧 payload 尚未发送完成时，`app_frame_ready` 被压低，上层应停止写入新数据包。若无上层数据帧请求，模块按周期发送生存状态帧。`app_payload_addr` 只是本地 payload RAM 的读索引，不属于帧格式字段。
 - **app_rx\***：上层接收数据帧接口。本节点收到 CRC 正确的新数据帧后，若 `dstID == 本机ID`，或 `dstID == 0xFF && len16 > 0`，`rx_dispatcher` 先查询上报去重表；未上报过的帧会把 header 和 payload 写入接收上报同步 FIFO，完整写入后再插入上报去重表。FIFO 读侧用 `app_rx_frame_valid` 上报 header、用 `app_rx_payload_valid` 按 word 上报 payload；已经上报过的重复帧不会再次上报给上层。广播数据包按转发去重表独立决定是否转发，本地上报和转发互不污染。上层通过 `app_rx_frame_ready` 和 `app_rx_payload_ready` 分别从该 FIFO 出口完成 header/payload 握手。`app_rx_payload_addr` 同样只是本地上报 payload 的 word 索引，不进入网络帧。
 
-节点内部处理逻辑运行在 **160 MHz** 主时钟域。每个光模块独占一组**异步 RX FIFO 和异步 TX FIFO**（跨时钟域）；端口数据在各自的 `rx_clk*` / `tx_clk*` 域采样和输出，内部调度、去重和判定仍在 `clk` 域完成。详见 [FIFO 架构](#10-fifo-架构与并行处理)。
+`node.v` 和 `node_top.v` 保留双光口板级接口以兼容当前工程。真正可参数化的核心是 `node_core.v`，其光口侧接口使用扁平总线：
+
+```verilog
+input  wire [NUM_PORTS-1:0]    rx_clk,
+input  wire [NUM_PORTS-1:0]    tx_clk,
+input  wire [NUM_PORTS*32-1:0] in_flat,
+input  wire [NUM_PORTS-1:0]    valid_in,
+output wire [NUM_PORTS*32-1:0] out_flat,
+output wire [NUM_PORTS-1:0]    valid_out
+```
+
+`node_top.v` 内部固定打包两个板级端口：`rx_clk_bus={rx_clk1,rx_clk0}`、`tx_clk_bus={tx_clk1,tx_clk0}`、`in_flat={in1,in0}`、`valid_in_bus={valid_in1,valid_in0}`，并从 `out_flat/valid_out` 拆回 `out0/out1` 和 `valid_out0/valid_out1`。扩展更多端口时直接实例化或封装 `node_core.v` 并设置 `NUM_PORTS`。
+
+节点内部处理逻辑运行在 **160 MHz** 主时钟域。每个光模块独占一组**异步 RX FIFO 和异步 TX FIFO**（跨时钟域）；端口数据在各自的 `rx_clk[p]` / `tx_clk[p]` 域采样和输出，内部调度、去重和判定仍在 `clk` 域完成。详见 [FIFO 架构](#10-fifo-架构与并行处理)。
 
 ## 4. 包分类
 
@@ -279,7 +293,7 @@ graph TB
 
 **数据流向**：
 
-1. 光模块串行数据经 SerDes 转为 32bit 并行字，写入**异步 RX FIFO**，由各端口自己的 `rx_clk*` 域采样后跨时钟域送入 `clk` 域。
+1. 光模块串行数据经 SerDes 转为 32bit 并行字，写入**异步 RX FIFO**，由各端口自己的 `rx_clk[p]` 域采样后跨时钟域送入 `clk` 域。
 2. **帧接收状态机**从 RX FIFO 读出 32bit 字，在其内部 buffer 中进行同步头检测、收帧、CRC 校验。
 3. CRC 校验通过后，完整帧驻留在状态机内部 buffer 中，置 "帧就绪" 标志。
 4. **rx_dispatcher** 按 Round-Robin 轮询各端口状态机的 "帧就绪" 标志，按序取出完整帧进行 srcID 自检（自已发出的包直接丢弃）和帧分类（本地单播/广播数据/纯转发/状态包）。需要本地上报时先查询上报去重表；未命中时再用接收上报同步 FIFO 的 `data_count` 检查 `2 + len16` 个 word 的完整空间，空间足够才依次写入 `{srcID,dstID,count}`、`{len16,16'h0}` 和 payload，完整写入后插入上报去重表。
@@ -307,7 +321,7 @@ graph TB
 
 ### 10.4 发送
 
-- **TX 侧**持续监测异步 TX FIFO 是否非空，非空则在各端口自己的 `tx_clk*` 域按序取出 32bit 字发送。
+- **TX 侧**持续监测异步 TX FIFO 是否非空，非空则在各端口自己的 `tx_clk[p]` 域按序取出 32bit 字发送。
 - 不受 1 秒周期限制，有数据即发。
 - 每帧发送前自动插入同步头，计算并追加 CRC32。
 
@@ -334,6 +348,8 @@ flowchart LR
 
 - **帧接收状态机 / rx_dispatcher / forward_engine** 运行在 160 MHz 主时钟域。
 - **异步 RX/TX FIFO** 由 `sources_1/ip/fifo_generator_32_512/fifo_generator_32_512.xci` 对应的 Vivado FIFO IP 实现，完成光模块接口时钟域与 160 MHz 主时钟域之间的跨时钟域转换。
+- `port_cdc.v` 按 `NUM_PORTS` 展开端口：每个端口独立使用 `rx_clk[p]`、`tx_clk[p]`、`in_flat[p*32 +: 32]`、`valid_in[p]`、`out_flat[p*32 +: 32]` 和 `valid_out[p]`，并独立例化 RX/TX 两个异步 FIFO。
+- 每个 `rx_clk[p]` 域都有独立的 `id_locked` 和 `rst` 两级同步器；每个 `tx_clk[p]` 域都有独立的 `rst` 两级同步器。RTL 不对不同端口时钟做组合逻辑运算，也不复用其他端口的时钟或数据。
 - 所有异步 FIFO 均配置为 **First Word Fall Through (FWFT)** 模式，即读使能有效后数据在下一个时钟周期即可读出，无需额外读延迟。
 - **接收上报同步 FIFO** 由 `sources_1/ip/fifo_generator_sync/fifo_generator_sync.xci` 对应的 Vivado FIFO IP 实现，端口为 `clk/srst/din/wr_en/rd_en/dout/full/empty/data_count`，宽度 32bit，深度 2048，12bit `data_count`，FWFT 模式；当前 RTL 用 `RX_REPORT_FIFO_DEPTH=2048` 做完整上报帧空间预检查。
 - 未来扩展更多光模块时，每新增一个光模块即新增一对异步 FIFO 和一个帧接收状态机。
