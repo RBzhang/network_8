@@ -7,10 +7,13 @@
 //------------------------------------------------------------------------------
 module frame_rx #(
     parameter SYNC_WORD  = 32'hA31E57BD,
-    parameter MAX_PAYLOAD = 256
+    parameter MAX_PAYLOAD = 256,
+    parameter CLK_FREQ_HZ = 160_000_000,
+    parameter CONGEST_TIMEOUT_SEC = 5
 ) (
     input  wire        clk,
     input  wire        rst,
+    input  wire        rx_pause,
     input  wire [31:0] fifo_dout,
     input  wire        fifo_empty,
     output wire        fifo_rd_en,
@@ -38,6 +41,10 @@ module frame_rx #(
     reg [31:0] crc_din;
     wire [31:0] crc_res;
     reg [31:0] crc_rcv;
+    localparam integer CONGEST_TIMEOUT_CYCLES = CLK_FREQ_HZ * CONGEST_TIMEOUT_SEC;
+    localparam integer CONGEST_TIMER_W = (CONGEST_TIMEOUT_CYCLES <= 1) ? 1 : $clog2(CONGEST_TIMEOUT_CYCLES + 1);
+    reg [CONGEST_TIMER_W-1:0] pause_count;
+    wire in_partial_frame = (st != HUNT) && (st != CHECK) && (st != DONE);
 
     crc32_calc u_crc (
         .clk(clk), .rst(rst),
@@ -45,19 +52,34 @@ module frame_rx #(
         .finalize(crc_final), .crc_out(crc_res)
     );
 
-    assign fifo_rd_en = (st != CHECK && st != DONE);
+    assign fifo_rd_en = !rx_pause && (st != CHECK && st != DONE);
     assign rx_payload = (st == DONE && frame_ready) ? buff[payload_index] : 32'd0;
 
     always @(posedge clk) begin
         if (rst) begin
             st <= HUNT; wi <= 0; tlen <= 0; frame_ready <= 0;
             crc_init <= 0; crc_en <= 0; crc_final <= 0; crc_din <= 0; crc_rcv <= 0;
+            pause_count <= {CONGEST_TIMER_W{1'b0}};
         end else begin
             crc_init <= 0; crc_en <= 0; crc_final <= 0;
             if (frame_ready && frame_consumed) begin
                 frame_ready <= 0; st <= HUNT; wi <= 0;
-            end else case (st)
+                pause_count <= {CONGEST_TIMER_W{1'b0}};
+            end else if (rx_pause && in_partial_frame) begin
+                if (pause_count >= CONGEST_TIMEOUT_CYCLES - 1) begin
+                    st <= HUNT;
+                    wi <= 0;
+                    tlen <= 0;
+                    frame_ready <= 1'b0;
+                    pause_count <= {CONGEST_TIMER_W{1'b0}};
+                end else begin
+                    pause_count <= pause_count + 1'b1;
+                end
+            end else begin
+                pause_count <= {CONGEST_TIMER_W{1'b0}};
+                case (st)
                 HUNT: begin
+                    pause_count <= {CONGEST_TIMER_W{1'b0}};
                     if (!fifo_empty && fifo_dout == SYNC_WORD) begin
                         st <= HEADER1; crc_init <= 1;
                     end
@@ -121,7 +143,8 @@ module frame_rx #(
                 end
 
                 default: st <= HUNT;
-            endcase
+                endcase
+            end
         end
     end
 

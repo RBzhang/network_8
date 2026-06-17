@@ -12,6 +12,7 @@ module node_top #(
     parameter DEDUP_DEPTH  = 64,
     parameter FIFO_DEPTH   = 512,
     parameter CLK_FREQ_HZ  = 160_000_000,
+    parameter CONGEST_TIMEOUT_SEC = 5,
     parameter NUM_PORTS    = 2
 ) (
     input  wire        clk,
@@ -49,7 +50,8 @@ module node_top #(
     output wire        valid_out1,
     output wire        liveness_valid,
     output wire [7:0]  liveness_node,
-    output wire        liveness_alive
+    output wire        liveness_alive,
+    output wire        network_congested
 );
     localparam PORT_W = (NUM_PORTS <= 1) ? 1 : $clog2(NUM_PORTS);
     localparam FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH);
@@ -144,10 +146,13 @@ module node_top #(
         for (p = 0; p < NUM_PORTS; p = p + 1) begin : g_rx
             frame_rx #(
                 .SYNC_WORD(SYNC_WORD),
-                .MAX_PAYLOAD(MAX_PAYLOAD)
+                .MAX_PAYLOAD(MAX_PAYLOAD),
+                .CLK_FREQ_HZ(CLK_FREQ_HZ),
+                .CONGEST_TIMEOUT_SEC(CONGEST_TIMEOUT_SEC)
             ) u_frame_rx (
                 .clk(clk),
                 .rst(rst || !id_locked),
+                .rx_pause(network_congested),
                 .fifo_dout(rx_dout[p]),
                 .fifo_empty(rx_empty[p]),
                 .fifo_rd_en(rx_rd_en[p]),
@@ -256,6 +261,7 @@ module node_top #(
         .clk(clk),
         .rst(rst || !id_locked),
         .tick_1s(tick_1s),
+        .tx_congested(network_congested),
         .app_frame_valid(app_frame_valid),
         .app_frame_ready(app_frame_ready),
         .app_frame_accepted(app_frame_accepted),
@@ -315,7 +321,10 @@ module node_top #(
     tx_arbiter #(
         .NUM_PORTS(NUM_PORTS),
         .FIFO_DEPTH(FIFO_DEPTH),
-        .FIFO_COUNT_W(FIFO_COUNT_W)
+        .FIFO_COUNT_W(FIFO_COUNT_W),
+        .MAX_PAYLOAD(MAX_PAYLOAD),
+        .CLK_FREQ_HZ(CLK_FREQ_HZ),
+        .CONGEST_TIMEOUT_SEC(CONGEST_TIMEOUT_SEC)
     ) u_tx_arbiter (
         .clk(clk),
         .rst(rst || !id_locked),
@@ -345,7 +354,8 @@ module node_top #(
         .tx_len16(tx_len16),
         .tx_payload_is_forward(tx_payload_is_forward),
         .tx_forward_payload_port(tx_forward_payload_port),
-        .shared_payload_index(tx_shared_payload_index)
+        .shared_payload_index(tx_shared_payload_index),
+        .network_congested(network_congested)
     );
 
     assign app_payload_addr = tx_payload_is_forward ? 16'd0 : tx_shared_payload_index;
