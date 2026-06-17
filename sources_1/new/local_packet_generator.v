@@ -60,7 +60,7 @@ module local_packet_generator #(
             if (packet_req) begin
                 if (packet_accept)
                     packet_req <= 1'b0;
-            end else if (app_frame_valid && !tx_congested && !app_payload_busy) begin
+            end else if (app_frame_valid && app_frame_ready) begin
                 packet_req <= 1'b1;
                 packet_is_app <= 1'b1;
                 packet_dst_id <= app_dst_id;

@@ -6,6 +6,9 @@
 // The behavioral branch is kept for local lint/simulation when USE_IP=0.
 // REQUIRED: fifo_generator_32_512 must be configured as FWFT.
 // dout is valid whenever empty == 0.
+// NOTE:
+// The IP instance name remains fifo_generator_32_512 for historical reasons,
+// but the actual configured depth is 8192 words.
 //------------------------------------------------------------------------------
 module async_fifo #(
     parameter DEPTH  = 8192,
