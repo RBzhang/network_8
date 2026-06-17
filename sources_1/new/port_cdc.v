@@ -74,7 +74,7 @@ module port_cdc #(
                 async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx_fifo (
                     .wr_clk(rx_clk0),
                     .rst(rst_rx0_sync),
-                    .wr_en(valid_in0 && id_locked_rx0 && !rx_rd_en[p]),
+                    .wr_en(valid_in0 && id_locked_rx0 && !rx_full[p]),
                     .din(in0),
                     .full(rx_full[p]),
                     .wr_data_count(unused_rx_wr_data_count),
@@ -101,7 +101,7 @@ module port_cdc #(
                 async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx_fifo (
                     .wr_clk(rx_clk1),
                     .rst(rst_rx1_sync),
-                    .wr_en(valid_in1 && id_locked_rx1 && !rx_rd_en[p]),
+                    .wr_en(valid_in1 && id_locked_rx1 && !rx_full[p]),
                     .din(in1),
                     .full(rx_full[p]),
                     .wr_data_count(unused_rx_wr_data_count),
