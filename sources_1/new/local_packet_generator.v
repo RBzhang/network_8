@@ -10,6 +10,7 @@ module local_packet_generator #(
     input  wire        clk,
     input  wire        rst,
     input  wire        tick_1s,
+    input  wire        tx_congested,
     input  wire        app_frame_valid,
     output wire        app_frame_ready,
     output reg         app_frame_accepted,
@@ -24,7 +25,7 @@ module local_packet_generator #(
     reg [15:0] next_count;
     reg        liveness_pending;
 
-    assign app_frame_ready = !rst && !packet_req;
+    assign app_frame_ready = !rst && !tx_congested && !packet_req;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -44,7 +45,7 @@ module local_packet_generator #(
             if (packet_req) begin
                 if (packet_accept)
                     packet_req <= 1'b0;
-            end else if (app_frame_valid) begin
+            end else if (app_frame_valid && !tx_congested) begin
                 packet_req <= 1'b1;
                 packet_dst_id <= app_dst_id;
                 packet_count <= next_count;

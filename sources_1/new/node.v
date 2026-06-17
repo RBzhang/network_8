@@ -12,6 +12,7 @@ module node #(
     parameter DEDUP_DEPTH  = 64,
     parameter FIFO_DEPTH   = 512,
     parameter CLK_FREQ_HZ  = 160_000_000,
+    parameter CONGEST_TIMEOUT_SEC = 5,
     parameter NUM_PORTS    = 2
 ) (
     input  wire        clk,
@@ -49,7 +50,8 @@ module node #(
     output wire        valid_out1,
     output wire        liveness_valid,
     output wire [7:0]  liveness_node,
-    output wire        liveness_alive
+    output wire        liveness_alive,
+    output wire        network_congested
 );
     node_top #(
         .SYNC_WORD(SYNC_WORD),
@@ -60,6 +62,7 @@ module node #(
         .DEDUP_DEPTH(DEDUP_DEPTH),
         .FIFO_DEPTH(FIFO_DEPTH),
         .CLK_FREQ_HZ(CLK_FREQ_HZ),
+        .CONGEST_TIMEOUT_SEC(CONGEST_TIMEOUT_SEC),
         .NUM_PORTS(NUM_PORTS)
     ) u_node_top (
         .clk(clk),
@@ -97,6 +100,7 @@ module node #(
         .valid_out1(valid_out1),
         .liveness_valid(liveness_valid),
         .liveness_node(liveness_node),
-        .liveness_alive(liveness_alive)
+        .liveness_alive(liveness_alive),
+        .network_congested(network_congested)
     );
 endmodule
