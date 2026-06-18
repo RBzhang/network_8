@@ -28,7 +28,7 @@ module liveness_table #(
     reg [WINDOW-1:0] w [0:MAX_NODES-1];
     reg [NODE_W-1:0] idx;
     reg       up;
-    reg       initialized;
+    reg       initialized = 1'b0;
     integer i;
 
     always @(posedge clk) begin
@@ -38,7 +38,7 @@ module liveness_table #(
             upload_valid <= 1'b0;
             upload_node <= 8'd0;
             upload_alive <= 1'b0;
-            initialized <= 1'b0;
+            // initialized <= 1'b0;
         end else begin
             upload_valid <= 1'b0;
 
@@ -55,10 +55,10 @@ module liveness_table #(
                 idx <= {NODE_W{1'b0}};
                 for (i = 0; i < MAX_NODES; i = i + 1)
                     w[i] <= {w[i][WINDOW-2:0], 1'b0};
-                if (update)
+                if (update && update_src < MAX_NODES)
                     w[update_src] <= {w[update_src][WINDOW-2:0], 1'b1};
             end else begin
-                if (update)
+                if (update && update_src < MAX_NODES)
                     w[update_src][0] <= 1'b1;
 
                 if (up) begin

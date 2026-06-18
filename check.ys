@@ -15,11 +15,13 @@ read_verilog sources_1/new/liveness_timer.v
 read_verilog sources_1/new/liveness_table.v
 read_verilog sources_1/new/port_cdc.v
 read_verilog sources_1/new/frame_rx.v
-read_verilog sources_1/new/frame_tx.v
 read_verilog sources_1/new/forward_engine.v
 read_verilog sources_1/new/rx_dispatcher.v
 read_verilog sources_1/new/local_packet_generator.v
-read_verilog sources_1/new/tx_arbiter.v
+read_verilog sources_1/new/tx_frame_fifo.v
+read_verilog sources_1/new/frame_meta_fifo.v
+read_verilog sources_1/new/port_tx_queue_sender.v
+read_verilog sources_1/new/tx_enqueue_engine.v
 read_verilog sources_1/new/node_core.v
 read_verilog sources_1/new/node_top.v
 read_verilog sources_1/new/node.v

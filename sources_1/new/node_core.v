@@ -14,6 +14,8 @@ module node_core #(
     parameter RX_REPORT_FIFO_DEPTH = 2048,
     parameter CLK_FREQ_HZ  = 160_000_000,
     parameter CONGEST_TIMEOUT_SEC = 5,
+    parameter TX_QUEUE_TIMEOUT_SEC = CONGEST_TIMEOUT_SEC,
+    parameter TX_QUEUE_TIMEOUT_CYCLES = CLK_FREQ_HZ * TX_QUEUE_TIMEOUT_SEC,
     parameter NUM_PORTS    = 2
 ) (
     input  wire        clk,
@@ -30,6 +32,8 @@ module node_core #(
     output wire        app_frame_done,
     input  wire [7:0]  app_dst_id,
     input  wire [15:0] app_len16,
+    // app_payload_data is expected to match app_payload_addr in the same clk
+    // cycle. A synchronous BRAM source must add its own one-cycle alignment.
     output wire [15:0] app_payload_addr,
     input  wire [31:0] app_payload_data,
     output wire        app_rx_frame_valid,
@@ -53,6 +57,9 @@ module node_core #(
 );
     localparam PORT_W = (NUM_PORTS <= 1) ? 1 : $clog2(NUM_PORTS);
     localparam FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH);
+    localparam TX_FRAME_QUEUE_COUNT_W = $clog2(FIFO_DEPTH + 1);
+    localparam TX_QUEUE_TIME_W = 32;
+    localparam TX_FRAME_META_W = TX_QUEUE_TIME_W + 16;
     localparam RX_REPORT_FIFO_COUNT_W = 12;
 
     wire [7:0] my_id;
@@ -127,6 +134,14 @@ module node_core #(
     end
     assign rx_overflow = rx_overflow_r;
 
+    reg [TX_QUEUE_TIME_W-1:0] tx_queue_time;
+    always @(posedge clk) begin
+        if (rst || !id_locked)
+            tx_queue_time <= {TX_QUEUE_TIME_W{1'b0}};
+        else
+            tx_queue_time <= tx_queue_time + 1'b1;
+    end
+
     wire [NUM_PORTS-1:0] frame_ready;
     wire [NUM_PORTS-1:0] frame_consumed;
     wire [7:0]           rx_src_id [0:NUM_PORTS-1];
@@ -142,9 +157,9 @@ module node_core #(
     wire [NUM_PORTS*16-1:0] rx_len16_flat;
     wire [NUM_PORTS*16-1:0] rx_dispatch_payload_index_flat;
     wire [NUM_PORTS*32-1:0] rx_payload_data_flat;
-    wire                    tx_payload_is_forward;
-    wire [PORT_W-1:0]       tx_forward_payload_port;
-    wire [15:0]             tx_shared_payload_index;
+    wire                    enqueue_payload_is_forward;
+    wire [PORT_W-1:0]       enqueue_payload_forward_port;
+    wire [15:0]             enqueue_payload_index;
 
     genvar p;
     generate
@@ -175,8 +190,8 @@ module node_core #(
             assign rx_dst_id_flat[p*8 +: 8] = rx_dst_id[p];
             assign rx_count_flat[p*16 +: 16] = rx_count[p];
             assign rx_len16_flat[p*16 +: 16] = rx_len16[p];
-            assign rx_payload_index[p] = (tx_payload_is_forward && (tx_forward_payload_port == p))
-                                       ? tx_shared_payload_index
+            assign rx_payload_index[p] = (enqueue_payload_is_forward && (enqueue_payload_forward_port == p))
+                                       ? enqueue_payload_index
                                        : rx_dispatch_payload_index_flat[p*16 +: 16];
             assign rx_payload_data_flat[p*32 +: 32] = rx_payload_data[p];
         end
@@ -361,29 +376,35 @@ module node_core #(
         .candidate_duplicate(forward_candidate_duplicate)
     );
 
-    wire [NUM_PORTS-1:0] tx_start;
-    wire [NUM_PORTS-1:0] tx_busy;
-    wire [NUM_PORTS-1:0] tx_done;
-    // Master counter broadcast from tx_arbiter, drives every frame_tx's
-    // payload_index (input) and the source frame_rx read address.
-    wire [NUM_PORTS*16-1:0] payload_index_flat;
-    wire [NUM_PORTS-1:0]  payload_gate_flat;
-    wire [NUM_PORTS-1:0]  payload_ready_flat;
-    wire [15:0]          tx_shared_payload_index;
-    wire [7:0]           tx_src_id;
-    wire [7:0]           tx_dst_id;
-    wire [15:0]          tx_count;
-    wire [15:0]          tx_len16;
-    wire [31:0]          tx_payload_data;
+    wire [NUM_PORTS-1:0] tx_frame_queue_wr_en;
+    wire [NUM_PORTS*34-1:0] tx_frame_queue_din_flat;
+    wire [NUM_PORTS-1:0] tx_frame_queue_rd_en;
+    wire [NUM_PORTS*34-1:0] tx_frame_queue_dout_flat;
+    wire [NUM_PORTS-1:0] tx_frame_queue_empty;
+    wire [NUM_PORTS-1:0] tx_frame_queue_full;
+    wire [NUM_PORTS*TX_FRAME_QUEUE_COUNT_W-1:0] tx_frame_queue_count_flat;
+    wire [NUM_PORTS-1:0] tx_frame_meta_wr_en;
+    wire [NUM_PORTS*TX_FRAME_META_W-1:0] tx_frame_meta_din_flat;
+    wire [NUM_PORTS-1:0] tx_frame_meta_rd_en;
+    wire [NUM_PORTS*TX_FRAME_META_W-1:0] tx_frame_meta_dout_flat;
+    wire [NUM_PORTS-1:0] tx_frame_meta_empty;
+    wire [NUM_PORTS-1:0] tx_frame_meta_full;
+    wire [NUM_PORTS*TX_FRAME_QUEUE_COUNT_W-1:0] tx_frame_meta_count_flat;
+    wire [NUM_PORTS-1:0] tx_queue_timeout_drop;
+    wire [31:0] enqueue_payload_data;
 
-    tx_arbiter #(
+    assign app_payload_addr = enqueue_payload_is_forward ? 16'd0 : enqueue_payload_index;
+    assign enqueue_payload_data = enqueue_payload_is_forward
+                                ? rx_payload_data[enqueue_payload_forward_port]
+                                : app_payload_data;
+
+    tx_enqueue_engine #(
+        .SYNC_WORD(SYNC_WORD),
         .NUM_PORTS(NUM_PORTS),
-        .FIFO_DEPTH(FIFO_DEPTH),
-        .FIFO_COUNT_W(FIFO_COUNT_W),
         .MAX_PAYLOAD(MAX_PAYLOAD),
-        .CLK_FREQ_HZ(CLK_FREQ_HZ),
-        .CONGEST_TIMEOUT_SEC(CONGEST_TIMEOUT_SEC)
-    ) u_tx_arbiter (
+        .QUEUE_DEPTH(FIFO_DEPTH),
+        .QUEUE_COUNT_W(TX_FRAME_QUEUE_COUNT_W)
+    ) u_tx_enqueue_engine (
         .clk(clk),
         .rst(rst || !id_locked),
         .my_id(my_id),
@@ -403,51 +424,73 @@ module node_core #(
         .forward_count(forward_count),
         .forward_len16(forward_len16),
         .forward_payload_port(forward_payload_port),
-        .tx_busy(tx_busy),
-        .tx_done(tx_done),
-        .tx_full(tx_full),
-        .tx_wr_data_count_flat(tx_wr_data_count_flat),
-        .payload_ready_flat(payload_ready_flat),
-        .payload_index_flat(payload_index_flat),
-        .payload_gate_flat(payload_gate_flat),
-        .tx_start(tx_start),
-        .tx_src_id(tx_src_id),
-        .tx_dst_id(tx_dst_id),
-        .tx_count(tx_count),
-        .tx_len16(tx_len16),
-        .tx_payload_is_forward(tx_payload_is_forward),
-        .tx_forward_payload_port(tx_forward_payload_port),
-        .shared_payload_index(tx_shared_payload_index),
+        .queue_full(tx_frame_queue_full),
+        .queue_data_count_flat(tx_frame_queue_count_flat),
+        .queue_wr_en(tx_frame_queue_wr_en),
+        .queue_din_flat(tx_frame_queue_din_flat),
+        .meta_full(tx_frame_meta_full),
+        .meta_wr_en(tx_frame_meta_wr_en),
+        .meta_din_flat(tx_frame_meta_din_flat),
+        .current_time(tx_queue_time),
+        .payload_index(enqueue_payload_index),
+        .payload_is_forward(enqueue_payload_is_forward),
+        .payload_forward_port(enqueue_payload_forward_port),
+        .payload_data(enqueue_payload_data),
         .network_congested(network_congested)
     );
-
-    assign app_payload_addr = tx_payload_is_forward ? 16'd0 : tx_shared_payload_index;
-    assign tx_payload_data = tx_payload_is_forward
-                           ? rx_payload_data[tx_forward_payload_port]
-                           : app_payload_data;
 
     genvar t;
     generate
         for (t = 0; t < NUM_PORTS; t = t + 1) begin : g_tx
-            frame_tx #(
-                .SYNC_WORD(SYNC_WORD)
-            ) u_frame_tx (
+            tx_frame_fifo #(
+                .DEPTH(FIFO_DEPTH),
+                .WIDTH(34),
+                .COUNT_W(TX_FRAME_QUEUE_COUNT_W)
+            ) u_tx_frame_fifo (
                 .clk(clk),
                 .rst(rst || !id_locked),
-                .start(tx_start[t]),
-                .src_id(tx_src_id),
-                .dst_id(tx_dst_id),
-                .count(tx_count),
-                .len16(tx_len16),
-                .payload_index(payload_index_flat[t*16 +: 16]),
-                .payload_data(tx_payload_data),
+                .wr_en(tx_frame_queue_wr_en[t]),
+                .din(tx_frame_queue_din_flat[t*34 +: 34]),
+                .rd_en(tx_frame_queue_rd_en[t]),
+                .dout(tx_frame_queue_dout_flat[t*34 +: 34]),
+                .empty(tx_frame_queue_empty[t]),
+                .full(tx_frame_queue_full[t]),
+                .data_count(tx_frame_queue_count_flat[t*TX_FRAME_QUEUE_COUNT_W +: TX_FRAME_QUEUE_COUNT_W])
+            );
+
+            frame_meta_fifo #(
+                .DEPTH(FIFO_DEPTH),
+                .TIME_W(TX_QUEUE_TIME_W),
+                .COUNT_W(TX_FRAME_QUEUE_COUNT_W)
+            ) u_frame_meta_fifo (
+                .clk(clk),
+                .rst(rst || !id_locked),
+                .wr_en(tx_frame_meta_wr_en[t]),
+                .din(tx_frame_meta_din_flat[t*TX_FRAME_META_W +: TX_FRAME_META_W]),
+                .rd_en(tx_frame_meta_rd_en[t]),
+                .dout(tx_frame_meta_dout_flat[t*TX_FRAME_META_W +: TX_FRAME_META_W]),
+                .empty(tx_frame_meta_empty[t]),
+                .full(tx_frame_meta_full[t]),
+                .data_count(tx_frame_meta_count_flat[t*TX_FRAME_QUEUE_COUNT_W +: TX_FRAME_QUEUE_COUNT_W])
+            );
+
+            port_tx_queue_sender #(
+                .TIME_W(TX_QUEUE_TIME_W),
+                .TX_QUEUE_TIMEOUT_CYCLES(TX_QUEUE_TIMEOUT_CYCLES)
+            ) u_port_tx_queue_sender (
+                .clk(clk),
+                .rst(rst || !id_locked),
+                .frame_dout(tx_frame_queue_dout_flat[t*34 +: 34]),
+                .frame_empty(tx_frame_queue_empty[t]),
+                .frame_rd_en(tx_frame_queue_rd_en[t]),
+                .meta_dout(tx_frame_meta_dout_flat[t*TX_FRAME_META_W +: TX_FRAME_META_W]),
+                .meta_empty(tx_frame_meta_empty[t]),
+                .meta_rd_en(tx_frame_meta_rd_en[t]),
+                .current_time(tx_queue_time),
                 .tx_full(tx_full[t]),
-                .payload_gate(payload_gate_flat[t]),
                 .tx_wr_en(tx_wr_en[t]),
                 .tx_din(tx_din[t]),
-                .busy(tx_busy[t]),
-                .done(tx_done[t]),
-                .payload_ready(payload_ready_flat[t])
+                .timeout_drop(tx_queue_timeout_drop[t])
             );
         end
     endgenerate

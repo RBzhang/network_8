@@ -2,6 +2,12 @@
 
 //------------------------------------------------------------------------------
 // node_top: 2-port board-level compatibility wrapper around node_core.
+// NOTE:
+// app_payload_data is assumed to be valid in the same cycle as app_payload_addr.
+// If the upper layer uses synchronous BRAM with 1-cycle read latency,
+// it must add an address/data alignment stage so that app_payload_data
+// presented to this module corresponds to the payload word requested by
+// app_payload_addr. Otherwise payload words may be shifted by one word.
 //------------------------------------------------------------------------------
 module node_top #(
     parameter SYNC_WORD    = 32'hA31E57BD,

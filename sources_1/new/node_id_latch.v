@@ -13,11 +13,15 @@ module node_id_latch (
 );
     always @(posedge clk) begin
         if (rst) begin
-            my_id <= 8'd0;
+            my_id <= 8'hFF;
             id_locked <= 1'b0;
-        end else if (!id_locked && node_id_valid) begin
+        end else if (!id_locked && node_id_valid && node_id != 8'hFF) begin
             my_id <= node_id;
             id_locked <= 1'b1;
+        end
+        else begin
+            my_id <= my_id;
+            id_locked <= id_locked;
         end
     end
 endmodule

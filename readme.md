@@ -38,9 +38,11 @@ node.v (兼容性封装，仅实例化 node_top)
         ├── local_packet_generator.v — 本地帧描述符生成（数据包/探活包）
         ├── forward_engine.v         — 转发去重 + 转发决策
         │     └── dedup_table.v      — 上报/转发去重表复用实现
-        ├── tx_arbiter.v             — 本地包/转发包仲裁
-        └── frame_tx.v ×NUM_PORTS    — 每端口帧发送状态机
-              └── crc32_calc.v       — CRC32 计算引擎（共享实例）
+        ├── tx_enqueue_engine.v      — 本地包/转发包组帧 + 按端口入队
+        │     └── crc32_calc.v       — CRC32 计算引擎
+        ├── tx_frame_fifo.v ×NUM_PORTS — 主 clk 域每端口完整帧队列
+        ├── frame_meta_fifo.v ×NUM_PORTS — 每端口帧长度/入队时间队列
+        └── port_tx_queue_sender.v ×NUM_PORTS — 队列到 TX async FIFO 搬运器
 ```
 
 ## 核心模块
@@ -68,6 +70,13 @@ input  wire [NUM_PORTS-1:0]    valid_in,
 output wire [NUM_PORTS*32-1:0] out_flat,
 output wire [NUM_PORTS-1:0]    valid_out
 ```
+`app_payload_addr/app_payload_data` 接口默认假设：
+`app_payload_addr` 给出后，`app_payload_data` 在同一周期内已经对应当前地址有效。
+因此，上层若使用组合读 RAM，可直接连接。
+
+若上层使用同步 BRAM，由于 BRAM 读数据通常延迟 1 个 clk 周期，
+上层必须自行完成地址/数据对齐：例如对 `app_payload_addr` 打一拍后作为 BRAM 读地址，
+并保证返回到 app_payload_data 的数据正好对应网络层当前正在发送的 payload word。
 
 其余 `app_frame_*`、`app_rx_*`、生存状态和 `network_congested` 接口语义与 `node_top` 保持一致。支持的参数：
 
@@ -83,6 +92,8 @@ output wire [NUM_PORTS-1:0]    valid_out
 | `RX_REPORT_FIFO_DEPTH` | `2048` | 接收上报同步 FIFO 深度 |
 | `CLK_FREQ_HZ` | `160_000_000` | 主时钟频率 |
 | `CONGEST_TIMEOUT_SEC` | `5` | 拥塞阻塞超时秒数 |
+| `TX_QUEUE_TIMEOUT_SEC` | `CONGEST_TIMEOUT_SEC` | 发送队列队首帧超时秒数 |
+| `TX_QUEUE_TIMEOUT_CYCLES` | `CLK_FREQ_HZ * TX_QUEUE_TIMEOUT_SEC` | 发送队列队首帧超时周期数 |
 | `NUM_PORTS` | `2` | `node_core` 光模块端口数 |
 
 ### `node.v` — 兼容性封装
@@ -103,7 +114,7 @@ output wire [NUM_PORTS-1:0]    valid_out
 - 在每个 `rx_clk[p]` 域独立同步 `id_locked` 和 `rst`，作为 RX FIFO 写使能和复位控制
 - 在每个 `tx_clk[p]` 域独立同步 `rst`，用于端口输出寄存器复位
 - 每端口实例化一对 `async_fifo`（RX + TX）
-- 将 TX FIFO 写时钟域的 `wr_data_count` 汇总给发送仲裁器，用于整帧空间预检查
+- 保留 TX FIFO 写时钟域的 `wr_data_count` 状态输出；整帧空间预检查由主时钟域每端口 `tx_frame_fifo` 的 `data_count` 完成
 - TX 侧持续监测 FIFO 非空，在端口自己的 `tx_clk[p]` 域输出 `out_flat[p*32 +: 32]` 和 `valid_out[p]`
 
 ### `frame_rx.v` — 帧接收器
@@ -143,30 +154,31 @@ output wire [NUM_PORTS-1:0]    valid_out
 - S_DECIDE: 去重决策
   - 已转发过：置 `candidate_duplicate=1`，本次不再转发
   - 未转发过且无需转发（`!candidate_should_forward`）：置 `candidate_done`，不插入转发去重表
-  - 未转发过且需要转发：提交 `forward_req` 给 `tx_arbiter`
-- S_REQ: 等待 `tx_arbiter` 返回；只有 `forward_accept=1 && forward_dropped=0` 时才插入转发去重表。若拥塞超时导致 `forward_dropped=1`，该帧不会被标记为已转发，后续重复到达时仍可再次尝试转发
+  - 未转发过且需要转发：提交 `forward_req` 给 `tx_enqueue_engine`
+- S_REQ: 等待 `tx_enqueue_engine` 返回；只有 `forward_accept=1 && forward_dropped=0` 时才插入转发去重表。若所有目标端口队列都没有完整帧空间，`forward_dropped=1`，该帧不会被标记为已转发，后续重复到达时仍可再次尝试转发
 - 输出 `candidate_duplicate` 表示“转发重复”，不再参与本地上报去重
 
-### `tx_arbiter.v` — 发送仲裁器
+### `tx_enqueue_engine.v` — 发送入队引擎
 
-仲裁本地包（来自 `local_packet_generator`）和转发包（来自 `forward_engine`）：
+仲裁并组帧本地包（来自 `local_packet_generator`）和转发包（来自 `forward_engine`）：
 
 - 转发包优先级高于本地包
-- 当所有目标端口 `tx_busy` 均为 0 时，先按 `4 + len16` 计算整帧 word 数，再用目标 TX FIFO 的 `wr_data_count` 检查是否有足够空间
-- 如果目标端口空间不足或 `full=1`，保持待发帧等待空间恢复，不启动 `frame_tx`，避免 TX FIFO 中出现半帧
-- 当发送侧拥塞导致无法接收完整帧时输出 `network_congested`，上层看到高电平应停止写入新数据包；转发帧阻塞超过 5 秒后丢弃，并通过 `forward_dropped` 通知 `forward_engine` 不写转发去重表
-- 本地包向所有端口广播；转发包向非接收端口发送
-- 4 状态 FSM: `IDLE → BUSY → WAIT_FWD_ACK / WAIT_LOCAL_ACK`
+- 完整帧格式保持 `SYNC_WORD`、`{src,dst,count}`、`{len16,16'd0}`、payload、CRC32
+- CRC32 只覆盖 header1/header2/payload，不覆盖 `SYNC_WORD`
+- 每帧入队前按 `4 + len16` 检查目标端口 `tx_frame_fifo` 剩余空间；空间不足的端口不写，避免半帧
+- 本地包只写入当前有足够空间的端口队列；若所有端口都没空间，`network_congested=1`
+- 转发包只写入 `forward_port_mask` 中有足够空间的端口；若所有目标端口都不可用，`forward_accept=1` 且 `forward_dropped=1`
+- payload 读取使用 `payload_index`，它只是本地 buffer/RAM 索引，不是协议帧字段
 
-### `frame_tx.v` — 帧发送器
+### `tx_frame_fifo.v` / `frame_meta_fifo.v` / `port_tx_queue_sender.v` — 每端口发送队列
 
-每个端口实例化一个，负责将帧描述符（src/dst/count/len16）序列化为协议帧写入 TX FIFO：
-
-- 写入同步头 → Header1 `{src, dst, count}` → Header2 `{len16, 0}` → Payload → CRC32
-- 每写入一个 word 同时送入 CRC32 计算引擎
-- payload 读取使用内部 `payload_index`，它只是本地 buffer/RAM 索引，不是协议帧字段
-- 内部实例化 `crc32_calc` 用于在线 CRC 计算
-- 8 状态 FSM: `IDLE → SYNC → HEADER1 → HEADER2 → PAYLOAD → CRC → CRC_WAIT → DONE`
+- `tx_frame_fifo` 是主 `clk` 域同步 FIFO，word 宽度 34bit，格式为 `{sof,eof,data[31:0]}`
+- `frame_meta_fifo` 与 `tx_frame_fifo` 一一对应，每帧保存 `{enqueue_time, frame_words}`；`tx_enqueue_engine` 在完整帧入队完成时同步写入 meta
+- 每个端口各有一个独立队列，端口之间不再共享 `frame_tx` 的 payload 推进节拍
+- `port_tx_queue_sender` 将该端口队列中的 32bit data word 搬运到 `port_cdc.v` 原有 TX async FIFO；async FIFO `full=1` 时暂停该端口，不影响其他端口继续发送
+- 若队首帧尚未开始写入 TX async FIFO，且 `current_time - enqueue_time >= TX_QUEUE_TIMEOUT_CYCLES`，`port_tx_queue_sender` 进入 DROP 状态，连续读出 `frame_words` 个 word 并丢弃，同时弹出 meta；DROP 不写 TX async FIFO
+- 一旦某帧已经开始写入 TX async FIFO，sender 会尽量等待 `full` 解除并写完整帧，不在帧中途超时丢弃
+- 该超时机制不是可靠传输机制，被丢弃的帧不会由网络层自动重传
 
 ### `local_packet_generator.v` — 本地包生成器
 
@@ -200,7 +212,7 @@ output wire [NUM_PORTS-1:0]    valid_out
 FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统实例化两张表：
 
 - **上报去重表**：位于 `rx_dispatcher`，只在本地上报帧完整写入 `rx_report_fifo` 后插入，用于避免同一数据包重复上报给上层
-- **转发去重表**：位于 `forward_engine`，只在转发请求被 `tx_arbiter` 确认为非丢弃完成后插入，用于避免同一数据包重复转发；拥塞超时丢弃不会插入，因此后续重复包仍有机会再次转发
+- **转发去重表**：位于 `forward_engine`，只在转发请求被 `tx_enqueue_engine` 确认为非丢弃完成后插入，用于避免同一数据包重复转发；所有目标端口队列都无完整帧空间时不会插入，因此后续重复包仍有机会再次转发
 
 - lookup: 遍历所有有效条目匹配
 - insert: 写指针处写入新条目；表满时覆盖最老条目
@@ -215,7 +227,7 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
 
 - `USE_IP=1`（默认）: 实例化 Vivado `fifo_generator_32_512` IP 核
 - `USE_IP=0`（仿真）: 纯 RTL 行为模型（双口 RAM + 格雷码指针 + 两级同步器）
-- 导出写时钟域 `wr_data_count`，供发送仲裁器在启动整帧写入前判断剩余空间
+- 导出写时钟域 `wr_data_count`，保留给端口级 TX async FIFO 状态观测；完整帧空间预检查在主时钟域的 `tx_frame_fifo` 上完成
 
 ### `sync_fifo.v` — 同步 FIFO
 
@@ -238,9 +250,10 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
                                                          ├── 存活性更新 → liveness_table
                                                         ├── local_should_deliver → 上报去重表 → rx_report_fifo → app_rx_* 上层接口
                                                         └── (srcID != my_id) 全部 → forward_engine (转发去重)
-                                                                                      └── 未转发过 && 需转发 → tx_arbiter (仲裁)
-                                                                                                                     ├── frame_tx ×NUM_PORTS
-                                                                                                                     │     └── async_fifo (clk → tx_clk*) → 光模块 TX
+                                                                                      └── 未转发过 && 需转发 → tx_enqueue_engine
+                                                                                                                     ├── tx_frame_fifo ×NUM_PORTS
+                                                                                                                     │     └── port_tx_queue_sender ×NUM_PORTS
+                                                                                                                     │           └── async_fifo (clk → tx_clk*) → 光模块 TX
                                                                                                                      └── local_packet_generator ← app_frame_* 上层接口
                                                                                                                            └── liveness_timer (1s tick)
 ```
@@ -259,7 +272,7 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
 
 - 工程已完成模块化 RTL 拆分，各模块职责清晰、接口标准化
 - `node.v` 为兼容性封装，`node_top.v` 为 2 光口板级 wrapper，实际可参数化逻辑入口为 `node_core.v`
-- 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`），并使用 IP 的 `wr_data_count` 做 TX 整帧空间预检查，该 FIFO IP 已经被设定为 FWFT 模式
+- 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`），该 FIFO IP 已经被设定为 FWFT 模式；TX 整帧空间预检查位于每端口主时钟域 `tx_frame_fifo`，队首帧超时丢弃由 `frame_meta_fifo` 和 `port_tx_queue_sender` 完成
 - 接收上报路径使用 Vivado `fifo_generator_sync` 同步 FIFO IP（`sources_1/ip/fifo_generator_sync/fifo_generator_sync.xci`），32bit 宽、FWFT、有 `data_count` 接口；上层 `app_rx_*` 从该 FIFO 的读侧获取数据
 
 ## 使用建议
@@ -278,5 +291,5 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
 2. 是否发送数据帧由上层模块给信号控制，数据帧内容（包括目的节点，数据长度，数据内容）也由上层模块给出，没有数据帧时就发送生存状态帧
 3. 接收机收到数据帧也可以据此获知 srcID 对应的节点存活
 4. 生存状态帧数据不随复位清零，不受复位控制
-5. 向多个发送端口写入同一个帧前，使用 TX FIFO `wr_data_count` 检查整帧空间；目标端口空间不足时等待，不写入半帧
-6. 当所有发送队列都无法写入完整包时输出 `network_congested`，禁止上层写入新包并暂停 RX 继续读入；当前转发包阻塞超过 5 秒后丢弃
+5. 向多个发送端口写入同一个帧前，使用每端口 `tx_frame_fifo` 的 `data_count` 检查整帧空间；空间不足的端口跳过，不写入半帧
+6. 当所有本地发送队列都无法写入完整包时输出 `network_congested`，禁止上层写入新包并暂停 RX 继续读入；当前转发包所有目标端口都不可用时返回 `forward_dropped`
