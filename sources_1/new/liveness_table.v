@@ -4,6 +4,11 @@
 //   Every tick_1s pulse: shift all windows left, start uploading table.
 //   update=1 sets LSB of window[update_src] to 1 (packet received).
 //   Upload: one node per cycle, upload_alive = |window[node] (0=offline).
+//
+// The window array is NOT cleared by rst (requirement: liveness data must
+// survive warm resets). Instead, it is cleared once by init_pulse (the
+// first id_locked edge produced by node_id_latch). This is fully
+// synthesizable and does not rely on FPGA power-on initial values.
 //------------------------------------------------------------------------------
 module liveness_table #(
     parameter MAX_NODES = 255,
@@ -15,6 +20,7 @@ module liveness_table #(
     input  wire        tick_1s,
     input  wire        update,
     input  wire [7:0]  update_src,
+    input  wire        init_pulse,
     output reg         upload_valid,
     output reg  [7:0]  upload_node,
     output reg         upload_alive
@@ -22,17 +28,8 @@ module liveness_table #(
     reg [WINDOW-1:0] w [0:MAX_NODES-1];
     reg [NODE_W-1:0] idx;
     reg       up;
+    reg       initialized;
     integer i;
-
-    initial begin
-        up = 0;
-        idx = 0;
-        upload_valid = 0;
-        upload_node = 0;
-        upload_alive = 0;
-        for (i = 0; i < MAX_NODES; i = i + 1)
-            w[i] = {WINDOW{1'b0}};
-    end
 
     always @(posedge clk) begin
         if (rst) begin
@@ -41,8 +38,17 @@ module liveness_table #(
             upload_valid <= 1'b0;
             upload_node <= 8'd0;
             upload_alive <= 1'b0;
+            initialized <= 1'b0;
         end else begin
             upload_valid <= 1'b0;
+
+            // One-time initialization on the first id_locked edge.
+            // Resets window memory (NOT affected by normal rst).
+            if (!initialized && init_pulse) begin
+                initialized <= 1'b1;
+                for (i = 0; i < MAX_NODES; i = i + 1)
+                    w[i] <= {WINDOW{1'b0}};
+            end
 
             if (tick_1s) begin
                 up <= 1'b1;

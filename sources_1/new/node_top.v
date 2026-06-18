@@ -53,7 +53,8 @@ module node_top #(
     output wire [7:0]  liveness_node,
     output wire        liveness_alive,
     output wire        network_congested,
-    output wire        app_len_error
+    output wire        app_len_error,
+    output wire        rx_overflow
 );
     localparam CORE_PORTS = 2;
 
@@ -119,6 +120,7 @@ module node_top #(
         .liveness_node(liveness_node),
         .liveness_alive(liveness_alive),
         .network_congested(network_congested),
-        .app_len_error(app_len_error)
+        .app_len_error(app_len_error),
+        .rx_overflow(rx_overflow)
     );
 endmodule

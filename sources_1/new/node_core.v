@@ -48,7 +48,8 @@ module node_core #(
     output wire [7:0]  liveness_node,
     output wire        liveness_alive,
     output wire        network_congested,
-    output wire        app_len_error
+    output wire        app_len_error,
+    output wire        rx_overflow
 );
     localparam PORT_W = (NUM_PORTS <= 1) ? 1 : $clog2(NUM_PORTS);
     localparam FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH);
@@ -113,6 +114,18 @@ module node_core #(
         .out_flat(out_flat),
         .valid_out(valid_out)
     );
+
+    // Sticky RX-overflow flag: latches high the first time any port's RX FIFO
+    // fills, cleared only by the main reset. Upper layers can poll this to
+    // detect that at least one incoming frame was silently dropped.
+    reg rx_overflow_r;
+    always @(posedge clk) begin
+        if (rst || !id_locked)
+            rx_overflow_r <= 1'b0;
+        else if (|rx_full)
+            rx_overflow_r <= 1'b1;
+    end
+    assign rx_overflow = rx_overflow_r;
 
     wire [NUM_PORTS-1:0] frame_ready;
     wire [NUM_PORTS-1:0] frame_consumed;
@@ -253,6 +266,17 @@ module node_core #(
         .tick_1s(tick_1s)
     );
 
+    // One-shot init pulse: fires on the rising edge of id_locked so that
+    // liveness_table can zero its window memory exactly once.
+    reg id_locked_d;
+    wire id_init = id_locked && !id_locked_d;
+    always @(posedge clk) begin
+        if (rst || !id_locked)
+            id_locked_d <= 1'b0;
+        else
+            id_locked_d <= id_locked;
+    end
+
     liveness_table #(
         .MAX_NODES(NODE_COUNT),
         .WINDOW(LIVENESS_WIN)
@@ -262,6 +286,7 @@ module node_core #(
         .tick_1s(tick_1s),
         .update(live_update),
         .update_src(live_update_src),
+        .init_pulse(id_init),
         .upload_valid(liveness_valid),
         .upload_node(liveness_node),
         .upload_alive(liveness_alive)
@@ -339,8 +364,12 @@ module node_core #(
     wire [NUM_PORTS-1:0] tx_start;
     wire [NUM_PORTS-1:0] tx_busy;
     wire [NUM_PORTS-1:0] tx_done;
-    wire [15:0]          tx_payload_index [0:NUM_PORTS-1];
-    wire [NUM_PORTS*16-1:0] tx_payload_index_flat;
+    // Master counter broadcast from tx_arbiter, drives every frame_tx's
+    // payload_index (input) and the source frame_rx read address.
+    wire [NUM_PORTS*16-1:0] payload_index_flat;
+    wire [NUM_PORTS-1:0]  payload_gate_flat;
+    wire [NUM_PORTS-1:0]  payload_ready_flat;
+    wire [15:0]          tx_shared_payload_index;
     wire [7:0]           tx_src_id;
     wire [7:0]           tx_dst_id;
     wire [15:0]          tx_count;
@@ -378,7 +407,9 @@ module node_core #(
         .tx_done(tx_done),
         .tx_full(tx_full),
         .tx_wr_data_count_flat(tx_wr_data_count_flat),
-        .tx_payload_index_flat(tx_payload_index_flat),
+        .payload_ready_flat(payload_ready_flat),
+        .payload_index_flat(payload_index_flat),
+        .payload_gate_flat(payload_gate_flat),
         .tx_start(tx_start),
         .tx_src_id(tx_src_id),
         .tx_dst_id(tx_dst_id),
@@ -408,15 +439,16 @@ module node_core #(
                 .dst_id(tx_dst_id),
                 .count(tx_count),
                 .len16(tx_len16),
-                .payload_index(tx_payload_index[t]),
+                .payload_index(payload_index_flat[t*16 +: 16]),
                 .payload_data(tx_payload_data),
                 .tx_full(tx_full[t]),
+                .payload_gate(payload_gate_flat[t]),
                 .tx_wr_en(tx_wr_en[t]),
                 .tx_din(tx_din[t]),
                 .busy(tx_busy[t]),
-                .done(tx_done[t])
+                .done(tx_done[t]),
+                .payload_ready(payload_ready_flat[t])
             );
-            assign tx_payload_index_flat[t*16 +: 16] = tx_payload_index[t];
         end
     endgenerate
 endmodule

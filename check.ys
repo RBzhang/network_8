@@ -1,0 +1,36 @@
+# Yosys synthesis check script for gtwizard_0_ex project
+# IP stubs replace Vivado FIFO IP cores (fifo_generator_32_512, fifo_generator_sync)
+
+# Read IP stubs first (must be before async_fifo/rx_report_fifo which instantiate them)
+read_verilog sim/ip_stubs.v
+
+# Read all core source files
+read_verilog sources_1/new/node_id_latch.v
+read_verilog sources_1/new/sync_fifo.v
+read_verilog sources_1/new/async_fifo.v
+read_verilog sources_1/new/rx_report_fifo.v
+read_verilog sources_1/new/crc32_calc.v
+read_verilog sources_1/new/dedup_table.v
+read_verilog sources_1/new/liveness_timer.v
+read_verilog sources_1/new/liveness_table.v
+read_verilog sources_1/new/port_cdc.v
+read_verilog sources_1/new/frame_rx.v
+read_verilog sources_1/new/frame_tx.v
+read_verilog sources_1/new/forward_engine.v
+read_verilog sources_1/new/rx_dispatcher.v
+read_verilog sources_1/new/local_packet_generator.v
+read_verilog sources_1/new/tx_arbiter.v
+read_verilog sources_1/new/node_core.v
+read_verilog sources_1/new/node_top.v
+read_verilog sources_1/new/node.v
+
+# Build hierarchy, top module is node_top
+hierarchy -top node_top
+
+# Run synthesis passes
+proc
+check
+opt
+
+# Print statistics
+stat

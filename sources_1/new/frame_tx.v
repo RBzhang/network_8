@@ -2,6 +2,17 @@
 
 //------------------------------------------------------------------------------
 // frame_tx: only frames one descriptor into a TX FIFO stream.
+//
+// payload_index and payload_gate are driven by tx_arbiter's shared master
+// counter so that every frame_tx instance started simultaneously for the same
+// frame reads the payload at the same address and advances in lock-step:
+//   * payload_index : which payload word to read this cycle (master counter).
+//   * payload_gate  : 1 this cycle only when the master says "all target ports
+//                     may accept one more payload word" — i.e. every active
+//                     frame_tx is in S_PAYLOAD and its FIFO is not full.
+// A frame_tx therefore writes a payload word iff payload_gate is high, which
+// is guaranteed to coincide with the master counter incrementing, so no
+// instance can skip or duplicate an index.
 //------------------------------------------------------------------------------
 module frame_tx #(
     parameter SYNC_WORD = 32'hA31E57BD
@@ -13,13 +24,18 @@ module frame_tx #(
     input  wire [7:0]  dst_id,
     input  wire [15:0] count,
     input  wire [15:0] len16,
-    output reg  [15:0] payload_index,
+    input  wire [15:0] payload_index,
     input  wire [31:0] payload_data,
     input  wire        tx_full,
+    input  wire        payload_gate,
     output reg         tx_wr_en,
     output reg  [31:0] tx_din,
     output reg         busy,
-    output reg         done
+    output reg         done,
+    // payload_ready: high while this instance is consuming a payload word this
+    // cycle (S_PAYLOAD and not full). tx_arbiter ANDs this across active ports
+    // to form payload_gate, keeping all instances synchronized.
+    output wire        payload_ready
 );
     localparam [2:0] S_IDLE      = 3'd0;
     localparam [2:0] S_SYNC      = 3'd1;
@@ -51,6 +67,11 @@ module frame_tx #(
         .crc_out(crc_out)
     );
 
+    // This instance is ready to consume one payload word iff it is in S_PAYLOAD
+    // and its own FIFO can accept it. The arbiter combines these across all
+    // active ports into payload_gate.
+    assign payload_ready = (st == S_PAYLOAD) && !tx_full;
+
     always @(posedge clk) begin
         if (rst) begin
             st <= S_IDLE;
@@ -58,7 +79,6 @@ module frame_tx #(
             dst_r <= 8'd0;
             count_r <= 16'd0;
             len_r <= 16'd0;
-            payload_index <= 16'd0;
             tx_wr_en <= 1'b0;
             tx_din <= 32'd0;
             busy <= 1'b0;
@@ -82,7 +102,6 @@ module frame_tx #(
                         dst_r <= dst_id;
                         count_r <= count;
                         len_r <= len16;
-                        payload_index <= 16'd0;
                         crc_init <= 1'b1;
                         busy <= 1'b1;
                         st <= S_SYNC;
@@ -120,16 +139,17 @@ module frame_tx #(
                     end
                 end
 
+                // Write a payload word only when the master counter advances
+                // (payload_gate), which happens iff every active frame_tx is
+                // ready this cycle. payload_index then points at the next word.
                 S_PAYLOAD: begin
-                    if (!tx_full) begin
+                    if (payload_gate) begin
                         tx_din <= payload_data;
                         tx_wr_en <= 1'b1;
                         crc_en <= 1'b1;
                         crc_data <= payload_data;
                         if (payload_index == len_r - 1) begin
                             st <= S_CRC;
-                        end else begin
-                            payload_index <= payload_index + 1'b1;
                         end
                     end
                 end
