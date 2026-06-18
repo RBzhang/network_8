@@ -13,8 +13,7 @@ module node #(
     parameter FIFO_DEPTH   = 8192,
     parameter RX_REPORT_FIFO_DEPTH = 2048,
     parameter CLK_FREQ_HZ  = 160_000_000,
-    parameter CONGEST_TIMEOUT_SEC = 5,
-    parameter NUM_PORTS    = 2
+    parameter CONGEST_TIMEOUT_SEC = 5
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -54,7 +53,8 @@ module node #(
     output wire [7:0]  liveness_node,
     output wire        liveness_alive,
     output wire        network_congested,
-    output wire        app_len_error
+    output wire        app_len_error,
+    output wire        rx_overflow
 );
     node_top #(
         .SYNC_WORD(SYNC_WORD),
@@ -66,8 +66,7 @@ module node #(
         .FIFO_DEPTH(FIFO_DEPTH),
         .RX_REPORT_FIFO_DEPTH(RX_REPORT_FIFO_DEPTH),
         .CLK_FREQ_HZ(CLK_FREQ_HZ),
-        .CONGEST_TIMEOUT_SEC(CONGEST_TIMEOUT_SEC),
-        .NUM_PORTS(NUM_PORTS)
+        .CONGEST_TIMEOUT_SEC(CONGEST_TIMEOUT_SEC)
     ) u_node_top (
         .clk(clk),
         .rst(rst),
@@ -107,6 +106,7 @@ module node #(
         .liveness_node(liveness_node),
         .liveness_alive(liveness_alive),
         .network_congested(network_congested),
-        .app_len_error(app_len_error)
+        .app_len_error(app_len_error),
+        .rx_overflow(rx_overflow)
     );
 endmodule
