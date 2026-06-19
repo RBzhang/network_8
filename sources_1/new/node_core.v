@@ -412,6 +412,8 @@ module node_core #(
         .local_accept(local_accept),
         .local_is_app(local_is_app),
         .local_app_done(local_app_done),
+        .app_frame_valid(app_frame_valid),
+        .app_len16(app_len16),
         .local_dst_id(local_dst_id),
         .local_count(local_count),
         .local_len16(local_len16),

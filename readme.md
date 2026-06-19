@@ -158,6 +158,10 @@ output wire [NUM_PORTS-1:0]    valid_out
 - S_REQ: 等待 `tx_enqueue_engine` 返回；只有 `forward_accept=1 && forward_dropped=0` 时才插入转发去重表。若所有目标端口队列都没有完整帧空间，`forward_dropped=1`，该帧不会被标记为已转发，后续重复到达时仍可再次尝试转发
 - 输出 `candidate_duplicate` 表示“转发重复”，不再参与本地上报去重
 
+- 当前转发策略为 best-effort per-port enqueue。
+对于 NUM_PORTS > 2 的复杂拓扑，若部分目标端口跳过，后续不会由转发层自动补发。
+若需要可靠多路径传播，应增加 per-port pending mask 或 ACK/重传机制。
+
 ### `tx_enqueue_engine.v` — 发送入队引擎
 
 仲裁并组帧本地包（来自 `local_packet_generator`）和转发包（来自 `forward_engine`）：
@@ -166,7 +170,7 @@ output wire [NUM_PORTS-1:0]    valid_out
 - 完整帧格式保持 `SYNC_WORD`、`{src,dst,count}`、`{len16,16'd0}`、payload、CRC32
 - CRC32 只覆盖 header1/header2/payload，不覆盖 `SYNC_WORD`
 - 每帧入队前按 `4 + len16` 检查目标端口 `tx_frame_fifo` 剩余空间；空间不足的端口不写，避免半帧
-- 本地包只写入当前有足够空间的端口队列；若所有端口都没空间，`network_congested=1`
+- 本地包只写入当前有足够空间的端口队列；`network_congested` 面向上层 app 帧按当前 `app_len16 + 4` 检查空间，小包不再要求端口必须能容纳 `MAX_PAYLOAD + 4` 的最大帧
 - 转发包只写入 `forward_port_mask` 中有足够空间的端口；若所有目标端口都不可用，`forward_accept=1` 且 `forward_dropped=1`
 - payload 读取使用 `payload_index`，它只是本地 buffer/RAM 索引，不是协议帧字段
 
@@ -179,6 +183,9 @@ output wire [NUM_PORTS-1:0]    valid_out
 - 若队首帧尚未开始写入 TX async FIFO，且 `current_time - enqueue_time >= TX_QUEUE_TIMEOUT_CYCLES`，`port_tx_queue_sender` 进入 DROP 状态，连续读出 `frame_words` 个 word 并丢弃，同时弹出 meta；DROP 不写 TX async FIFO
 - 一旦某帧已经开始写入 TX async FIFO，sender 会尽量等待 `full` 解除并写完整帧，不在帧中途超时丢弃
 - 该超时机制不是可靠传输机制，被丢弃的帧不会由网络层自动重传
+- port_tx_queue_sender 的超时丢弃仅作用于尚未开始写入 TX async FIFO 的队首帧。
+一旦某帧已经开始写入 TX async FIFO，sender 会等待该端口 tx_full 解除后继续写完该帧。
+因此，若外部链路长期不读取导致 TX async FIFO 长期 full，该端口会保持暂停状态，直到外部链路恢复；该行为只影响对应端口，不影响其他端口。
 
 ### `local_packet_generator.v` — 本地包生成器
 
@@ -191,7 +198,7 @@ output wire [NUM_PORTS-1:0]    valid_out
 - `app_frame_accepted` 只表示发送请求描述符已锁存，不表示 payload 已经读完
 - `app_frame_done` 是本地 app 数据帧完成信号；上层必须等到它置位后才能释放或改写本次 payload RAM
 - `app_len16 > MAX_PAYLOAD` 时 `app_frame_ready` 保持低电平，并通过 `app_len_error` 提示上层；已接受的数据帧直接使用 `app_len16` 作为 `packet_len16`，不会再做截断
-- `network_congested=1` 时压低 `app_frame_ready`，禁止上层继续写入新数据包
+- `network_congested=1` 时压低 `app_frame_ready`，禁止上层继续写入新数据包；该信号按当前合法 `app_len16 + 4` 判断是否至少有一个端口能容纳完整帧，避免小包被最大帧空间判断误阻塞
 - 维护 `count` 计数器（数据帧和探活帧共用）
 
 ### `liveness_timer.v` — 探活定时器
@@ -274,6 +281,9 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
 - `node.v` 为兼容性封装，`node_top.v` 为 2 光口板级 wrapper，实际可参数化逻辑入口为 `node_core.v`
 - 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`），该 FIFO IP 已经被设定为 FWFT 模式；TX 整帧空间预检查位于每端口主时钟域 `tx_frame_fifo`，队首帧超时丢弃由 `frame_meta_fifo` 和 `port_tx_queue_sender` 完成
 - 接收上报路径使用 Vivado `fifo_generator_sync` 同步 FIFO IP（`sources_1/ip/fifo_generator_sync/fifo_generator_sync.xci`），32bit 宽、FWFT、有 `data_count` 接口；上层 `app_rx_*` 从该 FIFO 的读侧获取数据
+- 当前转发策略为 best-effort per-port enqueue。
+对于 NUM_PORTS > 2 的复杂拓扑，若部分目标端口跳过，后续不会由转发层自动补发。
+若需要可靠多路径传播，应增加 per-port pending mask 或 ACK/重传机制。
 
 ## 使用建议
 
@@ -292,4 +302,4 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
 3. 接收机收到数据帧也可以据此获知 srcID 对应的节点存活
 4. 生存状态帧数据不随复位清零，不受复位控制
 5. 向多个发送端口写入同一个帧前，使用每端口 `tx_frame_fifo` 的 `data_count` 检查整帧空间；空间不足的端口跳过，不写入半帧
-6. 当所有本地发送队列都无法写入完整包时输出 `network_congested`，禁止上层写入新包并暂停 RX 继续读入；当前转发包所有目标端口都不可用时返回 `forward_dropped`
+6. `network_congested` 按当前上层 `app_len16 + 4` 判断完整帧空间，禁止上层写入当前无端口可容纳的新包并暂停 RX 继续读入；当前转发包所有目标端口都不可用时返回 `forward_dropped`

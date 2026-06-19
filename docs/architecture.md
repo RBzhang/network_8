@@ -144,7 +144,7 @@ output wire [NUM_PORTS-1:0]    valid_out
 
 - 数据帧是否发送由上层 `app_frame_valid` 控制，目的节点、payload 长度和 payload 内容均由上层提供。
 - `tx_enqueue_engine` 空闲且 `app_frame_valid && app_frame_ready` 时，模块锁存上层数据帧请求，并把完整协议帧写入当前有足够空间的端口队列。`app_frame_accepted` 只表示请求描述符已锁存；`app_frame_done` 才表示 payload 读取和本地帧入队已完成。
-- 写入端口队列前，`tx_enqueue_engine` 使用每端口主 `clk` 域 `tx_frame_fifo` 的 `data_count` 检查完整帧空间。整帧所需 word 数为 `4 + len16`（同步头、两字 header、payload、CRC）；空间不足的端口不写入，避免队列中出现半帧。本地包若所有端口都没有空间，`network_congested=1`；转发包若 `forward_port_mask` 中所有目标端口都不可用，立即返回 `forward_accept=1, forward_dropped=1`。
+- 写入端口队列前，`tx_enqueue_engine` 使用每端口主 `clk` 域 `tx_frame_fifo` 的 `data_count` 检查完整帧空间。整帧所需 word 数为 `4 + len16`（同步头、两字 header、payload、CRC）；空间不足的端口不写入，避免队列中出现半帧。上层数据帧的 `network_congested` 预检按当前 `app_len16 + 4` 判断，小包只要求任一端口能容纳当前完整帧，不再要求端口必须能容纳 `MAX_PAYLOAD + 4` 的最大帧；转发包若 `forward_port_mask` 中所有目标端口都不可用，立即返回 `forward_accept=1, forward_dropped=1`。
 - 没有上层数据帧请求时，节点固定**每 1 秒**产生一个零 payload 的广播状态包，用于生存状态探活。
 - 节点自己产生的数据帧和状态包共用 `count` 字段，发送时 `count` 自增 1。
 - **转发他人的包不受 1 秒限制**：`tx_enqueue_engine` 处理完一帧后，若需转发，立即尝试写入对应端口的 `tx_frame_fifo`。
@@ -162,7 +162,7 @@ flowchart TD
 
 | 场景 | 发送行为 |
 |------|----------|
-| **自己产生的包**（数据包或状态包） | 向**所有**光模块同时发出（当前为 2 个，未来可扩展） |
+| **自己产生的包**（数据包或状态包） | 尝试向**所有光模块**发送，但只写入当前有完整帧空间的端口队列；空间不足的端口跳过 |
 | **转发他人的包** | 向**除了接收到该包的光模块以外**的所有光模块发出（即从另一个口出去） |
 
 **效果**：自己产生的包沿环的两个方向传播，取最短路径先到达；转发他人的包仅沿原方向继续传递，不会回传。
@@ -337,7 +337,7 @@ graph TB
 - 每个端口拥有一个主 `clk` 域 **`tx_frame_fifo`**，word 宽度 34bit，格式为 `{sof,eof,data[31:0]}`，保存已经完成同步头、header、payload 和 CRC 的完整帧 word 流。
 - 每个端口另有一个主 `clk` 域 **`frame_meta_fifo`**，每帧保存 `{enqueue_time, frame_words}`。`tx_enqueue_engine` 在 CRC word 写入 `tx_frame_fifo` 的同一拍写入 meta，因此 sender 看到 meta 时该帧已经完整入队。
 - `tx_enqueue_engine` 入队前计算整帧长度 `4 + len16`，并检查目标端口 `tx_frame_fifo` 是否至少还有该数量的空位。
-- 本地包不再要求所有端口都有空间：当前有空间的端口立即入队，没空间的端口跳过；若所有端口都没空间，`network_congested=1`。
+- 本地包不再要求所有端口都有空间：当前有空间的端口立即入队，没空间的端口跳过。`network_congested` 面向上层 app 帧按当前 `app_len16 + 4` 检查空间，小包不会被 `MAX_PAYLOAD + 4` 的最大帧空间判断误阻塞；若 `tx_enqueue_engine` 忙，或合法 `app_frame_valid` 当前没有任何端口能容纳该完整帧，则 `network_congested=1`。
 - 转发包只写入 `forward_port_mask` 中有空间的端口；若所有目标端口都不可用，`forward_dropped=1` 且 `forward_accept=1`，接收 buffer 被释放，但该 `(srcID,count)` 不写入转发去重表。
 - `port_cdc.v` 中原有每端口 TX async FIFO 保持不变；`port_tx_queue_sender` 在 async FIFO `full=0` 时才写入，因此单个端口堵塞只会暂停该端口 sender，不会阻塞其他端口队列继续搬运。
 - `port_tx_queue_sender` 只在 IDLE 状态检查队首 meta 的 `current_time - enqueue_time`。若超过 `TX_QUEUE_TIMEOUT_CYCLES` 且该帧尚未开始写入 TX async FIFO，则进入 DROP 状态，连续从 `tx_frame_fifo` 读出 `frame_words` 个 word 并丢弃，最后弹出 meta 并给出内部 `timeout_drop` 单拍脉冲。

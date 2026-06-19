@@ -20,6 +20,8 @@ module tx_enqueue_engine #(
     output reg        local_accept,
     input  wire       local_is_app,
     output reg        local_app_done,
+    input  wire       app_frame_valid,
+    input  wire [15:0] app_len16,
     input  wire [7:0] local_dst_id,
     input  wire [15:0] local_count,
     input  wire [15:0] local_len16,
@@ -82,17 +84,20 @@ module tx_enqueue_engine #(
     integer k;
     reg [NUM_PORTS-1:0] local_room_mask;
     reg [NUM_PORTS-1:0] forward_room_mask;
-    reg [NUM_PORTS-1:0] max_room_mask;
+    reg [NUM_PORTS-1:0] app_room_mask;
+    wire [15:0] app_words = app_len16 + 16'd4;
     wire [15:0] local_words = local_len16 + 16'd4;
     wire [15:0] forward_words = forward_len16 + 16'd4;
-    wire [15:0] max_frame_words = MAX_PAYLOAD_WORDS + 16'd4;
     wire [15:0] active_words = active_len + 16'd4;
 
     assign payload_index = payload_idx;
     assign payload_is_forward = active_forward;
     assign payload_forward_port = payload_port_r;
-    assign network_congested = (st == S_IDLE) &&
-                               ((local_req && !(|local_room_mask)) || !(|max_room_mask));
+    assign network_congested = (st != S_IDLE) ||
+                               (app_frame_valid &&
+                                (app_len16 <= MAX_PAYLOAD_WORDS) &&
+                                (app_len16 > 16'd0) &&
+                                !(|app_room_mask));
 
     crc32_calc u_crc (
         .clk(clk),
@@ -139,12 +144,12 @@ module tx_enqueue_engine #(
     always @(*) begin
         local_room_mask = {NUM_PORTS{1'b0}};
         forward_room_mask = {NUM_PORTS{1'b0}};
-        max_room_mask = {NUM_PORTS{1'b0}};
+        app_room_mask = {NUM_PORTS{1'b0}};
 
         for (i = 0; i < NUM_PORTS; i = i + 1) begin
             if (!queue_full[i] && !meta_full[i] &&
-                has_frame_room(queue_data_count_flat[i*QUEUE_COUNT_W +: QUEUE_COUNT_W], max_frame_words))
-                max_room_mask[i] = 1'b1;
+                has_frame_room(queue_data_count_flat[i*QUEUE_COUNT_W +: QUEUE_COUNT_W], app_words))
+                app_room_mask[i] = 1'b1;
 
             if (!queue_full[i] && !meta_full[i] &&
                 has_frame_room(queue_data_count_flat[i*QUEUE_COUNT_W +: QUEUE_COUNT_W], local_words))
