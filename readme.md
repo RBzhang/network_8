@@ -339,7 +339,7 @@ Node0 -- Node1 -- Node2 -- Node3 -- Node4 -- Node5 -- Node6 -- Node7 -- (回 Nod
 
 ### 测试结果 (iverilog 12.0, 2026-06-19)
 
-**状态: 阻塞 — TX 通路无输出**
+**历史状态: 阻塞 — TX 通路无输出（已被后续 LINKSEQ/RXSEQ 诊断更新）**
 
 | 检查项 | 结果 |
 |--------|------|
@@ -347,15 +347,15 @@ Node0 -- Node1 -- Node2 -- Node3 -- Node4 -- Node5 -- Node6 -- Node7 -- (回 Nod
 | Yosys 综合检查 | 通过 |
 | 复位/ID 分配 | 通过 (`send_app_frame` 完成握手，`app_frame_done` 正常脉冲) |
 | `network_congested` | 0 (未拥塞) |
-| `valid_out0/valid_out1` (全节点) | **始终为 0 — 无数据输出到环网** |
+| `valid_out0/valid_out1` (全节点) | 历史观测曾记录为始终为 0；后续诊断已确认 Node0 的 `valid_out0/valid_out1` 会拉高 |
 | `received_frame_count` (全节点) | 全 0 — 无节点收到任何帧 |
 
-**根本原因分析 (初步):**
+**历史根本原因分析 (已被后续诊断更新):**
 
 测试平台中 `send_app_frame` 任务正确完成了 `app_frame_valid/ready` 握手和 `app_frame_done` 等待，
 帧已由 `tx_enqueue_engine` 写入 per-port `tx_frame_fifo`/`frame_meta_fifo` 队列，
-但 `port_tx_queue_sender` → TX async FIFO → `port_cdc` 输出寄存器 链路上 `valid_out` 始终为 0。
-需要 Vivado 波形级调试定位具体阻塞点。
+早期曾判断 `port_tx_queue_sender` → TX async FIFO → `port_cdc` 输出寄存器链路上 `valid_out` 始终为 0。
+后续 `LINKSEQ/RXSEQ` 诊断已确认 Node0 有 TX 输出，当前重点改为排查 TX/link 首字重复。
 
 **排查方向:**
 - `port_tx_queue_sender` 是否进入 S_DROP（超时丢弃）或停在 S_IDLE
@@ -416,3 +416,35 @@ vvp sim_build\tb_8node_ring.vvp
 - 自动诊断结论：`RX FIFO/frame_rx/CRC parse problem; inspect frame_rx.st, crc_res, crc_rcv.`
 
 这说明当前失败点更靠近 RX 解析链路，而不是 Test 1 的判定逻辑本身。
+
+## FIFO 模型对比调试结论
+
+本轮在 `tb_8node_ring.v` 中为 Test 1 增加了 `LINKSEQ`、`RXSEQ` 和更详细的 `RXDBG` 字段，覆盖 Node1 port1 与 Node7 port0 的首跳输入、RX FIFO 读出、`frame_rx.sid/did/cnt/plen/tlen/wi` 以及 CRC 状态。同时在 `async_fifo.v` 中增加 `IVERILOG_BEHAV_FIFO` 仿真宏：默认 Vivado/RTL 行为仍按 `USE_IP=1` 实例化 FIFO IP，只有 iverilog 编译加入 `-DIVERILOG_BEHAV_FIFO` 时才强制使用内置行为模型。
+
+两组命令均可完成编译，但 `vvp` 都在 Test 1 超时退出：
+
+- stub 模式：`iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`
+- 行为 FIFO 模式：`iverilog -g2012 -DIVERILOG_BEHAV_FIFO -o sim_build/tb_8node_ring_behav.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`
+
+两种模式的关键前 8 个 word 完全一致：
+
+- Node1/Node7 `LINKSEQ`: `a31e57bd a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003`
+- Node1/Node7 `RXSEQ`: `a31e57bd a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003`
+
+因此当前自动诊断结论是：同一首跳端口在链路输入侧已经看到连续两个 `SYNC_WORD`，RX FIFO 读出只是复现了该序列；这不像是 `sim/ip_stubs.v` 的 FIFO IP stub 单独造成的问题。优先怀疑 `port_cdc` TX 输出时序或 testbench link pipeline 在 `valid/data` 对齐上重复了首字。`frame_rx` 中 `sid/did/plen/wi` 错位和 CRC 不一致是后续结果：第二个 `SYNC_WORD` 被当作 header1 消费，导致最后一个 payload 被误当作 CRC。下一步应继续在 Node0 `valid_out0/valid_out1` 和 `port_cdc` TX 侧增加 TXSEQ，对比 TX async FIFO 读出、TX sender 输出与 testbench link 输入，暂不需要先大改 `frame_rx` 或协议格式。
+
+## 发布脚本
+
+仓库新增了一个 PowerShell 发布脚本：[`scripts/publish_to_main.ps1`](scripts/publish_to_main.ps1)。
+
+它只接受显式路径，避免把 `sim_build/` 之类的临时文件误提交到主线。示例：
+
+```powershell
+.\scripts\publish_to_main.ps1 -Message "fix tx/rx debug" -Paths `
+    readme.md `
+    sim_1/new/tb_8node_ring.v `
+    sources_1/new/async_fifo.v `
+    scripts/publish_to_main.ps1
+```
+
+脚本会在 `main` 分支上完成 `git add`、`git commit` 和 `git push origin main`，因此可以直接把当前改动发布到 GitHub 的 `main`。

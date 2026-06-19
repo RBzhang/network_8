@@ -30,8 +30,14 @@ module async_fifo #(
     output wire [WIDTH-1:0] dout,
     output wire             empty
 );
+`ifdef IVERILOG_BEHAV_FIFO
+    localparam integer SIM_FORCE_BEHAV = 1;
+`else
+    localparam integer SIM_FORCE_BEHAV = 0;
+`endif
+
 generate
-    if (USE_IP) begin : g_vivado_ip
+    if (USE_IP && !SIM_FORCE_BEHAV) begin : g_vivado_ip
         wire wr_rst_busy;
         wire rd_rst_busy;
 

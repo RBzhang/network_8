@@ -210,6 +210,18 @@ module tb_8node_ring;
     reg seen_node7_valid_out;
     reg node4_frame_ready;
     reg node4_app_rx_frame_valid;
+    integer node1_link_seq_idx;
+    integer node7_link_seq_idx;
+    integer node1_rx_seq_idx;
+    integer node7_rx_seq_idx;
+    integer node1_link_sync_count;
+    integer node7_link_sync_count;
+    integer node1_rx_sync_count;
+    integer node7_rx_sync_count;
+    reg [31:0] node1_link_first_words [0:7];
+    reg [31:0] node7_link_first_words [0:7];
+    reg [31:0] node1_rx_first_words [0:7];
+    reg [31:0] node7_rx_first_words [0:7];
 
     genvar gn;
     generate
@@ -254,16 +266,36 @@ module tb_8node_ring;
         if (rst) begin
             seen_node1_in1_sync <= 1'b0;
             seen_node7_in0_sync <= 1'b0;
+            node1_link_seq_idx <= 0;
+            node7_link_seq_idx <= 0;
+            node1_link_sync_count <= 0;
+            node7_link_sync_count <= 0;
+            for (integer link_rst_i = 0; link_rst_i < 8; link_rst_i = link_rst_i + 1) begin
+                node1_link_first_words[link_rst_i] <= 32'd0;
+                node7_link_first_words[link_rst_i] <= 32'd0;
+            end
         end else begin
             if (valid_in1[1]) begin
+                $display("LINKSEQ node=1 port=1 idx=%0d data=%08h", node1_link_seq_idx, in1[1]);
                 $display("LINKDBG time=%0t node=1 port=1 data=%08h", $time, in1[1]);
-                if (in1[1] == 32'hA31E57BD)
+                if (node1_link_seq_idx < 8)
+                    node1_link_first_words[node1_link_seq_idx] <= in1[1];
+                if (in1[1] == 32'hA31E57BD) begin
                     seen_node1_in1_sync <= 1'b1;
+                    node1_link_sync_count <= node1_link_sync_count + 1;
+                end
+                node1_link_seq_idx <= node1_link_seq_idx + 1;
             end
             if (valid_in0[7]) begin
+                $display("LINKSEQ node=7 port=0 idx=%0d data=%08h", node7_link_seq_idx, in0[7]);
                 $display("LINKDBG time=%0t node=7 port=0 data=%08h", $time, in0[7]);
-                if (in0[7] == 32'hA31E57BD)
+                if (node7_link_seq_idx < 8)
+                    node7_link_first_words[node7_link_seq_idx] <= in0[7];
+                if (in0[7] == 32'hA31E57BD) begin
                     seen_node7_in0_sync <= 1'b1;
+                    node7_link_sync_count <= node7_link_sync_count + 1;
+                end
+                node7_link_seq_idx <= node7_link_seq_idx + 1;
             end
         end
     end
@@ -275,11 +307,41 @@ module tb_8node_ring;
             seen_node7_frame_ready <= 1'b0;
             node4_frame_ready <= 1'b0;
             node4_app_rx_frame_valid <= 1'b0;
+            node1_rx_seq_idx <= 0;
+            node7_rx_seq_idx <= 0;
+            node1_rx_sync_count <= 0;
+            node7_rx_sync_count <= 0;
+            for (integer rx_rst_i = 0; rx_rst_i < 8; rx_rst_i = rx_rst_i + 1) begin
+                node1_rx_first_words[rx_rst_i] <= 32'd0;
+                node7_rx_first_words[rx_rst_i] <= 32'd0;
+            end
         end else begin
+            if (g_node[1].u_node.u_node_core.rx_rd_en[1]) begin
+                $display("RXSEQ node=1 port=1 idx=%0d dout=%08h st=%0d",
+                         node1_rx_seq_idx,
+                         g_node[1].u_node.u_node_core.rx_dout_flat[1*32 +: 32],
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.st);
+                if (node1_rx_seq_idx < 8)
+                    node1_rx_first_words[node1_rx_seq_idx] <= g_node[1].u_node.u_node_core.rx_dout_flat[1*32 +: 32];
+                if (g_node[1].u_node.u_node_core.rx_dout_flat[1*32 +: 32] == 32'hA31E57BD)
+                    node1_rx_sync_count <= node1_rx_sync_count + 1;
+                node1_rx_seq_idx <= node1_rx_seq_idx + 1;
+            end
+            if (g_node[7].u_node.u_node_core.rx_rd_en[0]) begin
+                $display("RXSEQ node=7 port=0 idx=%0d dout=%08h st=%0d",
+                         node7_rx_seq_idx,
+                         g_node[7].u_node.u_node_core.rx_dout_flat[0*32 +: 32],
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.st);
+                if (node7_rx_seq_idx < 8)
+                    node7_rx_first_words[node7_rx_seq_idx] <= g_node[7].u_node.u_node_core.rx_dout_flat[0*32 +: 32];
+                if (g_node[7].u_node.u_node_core.rx_dout_flat[0*32 +: 32] == 32'hA31E57BD)
+                    node7_rx_sync_count <= node7_rx_sync_count + 1;
+                node7_rx_seq_idx <= node7_rx_seq_idx + 1;
+            end
             if (g_node[1].u_node.u_node_core.rx_rd_en[1] ||
                 g_node[1].u_node.u_node_core.frame_ready[1] ||
                 g_node[1].u_node.u_node_core.frame_consumed[1]) begin
-                $display("RXDBG time=%0t node=1 port=1 empty=%0d rd_en=%0d dout=%08h ready=%0d consumed=%0d st=%0d crc_res=%08h crc_rcv=%08h",
+                $display("RXDBG time=%0t node=1 port=1 empty=%0d rd_en=%0d dout=%08h ready=%0d consumed=%0d st=%0d crc_res=%08h crc_rcv=%08h sid=%02h did=%02h cnt=%04h plen=%04h tlen=%04h wi=%04h",
                          $time,
                          g_node[1].u_node.u_node_core.rx_empty[1],
                          g_node[1].u_node.u_node_core.rx_rd_en[1],
@@ -288,12 +350,18 @@ module tb_8node_ring;
                          g_node[1].u_node.u_node_core.frame_consumed[1],
                          g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.st,
                          g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.crc_res,
-                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.crc_rcv);
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.crc_rcv,
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.sid,
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.did,
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.cnt,
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.plen,
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.tlen,
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.wi);
             end
             if (g_node[7].u_node.u_node_core.rx_rd_en[0] ||
                 g_node[7].u_node.u_node_core.frame_ready[0] ||
                 g_node[7].u_node.u_node_core.frame_consumed[0]) begin
-                $display("RXDBG time=%0t node=7 port=0 empty=%0d rd_en=%0d dout=%08h ready=%0d consumed=%0d st=%0d crc_res=%08h crc_rcv=%08h",
+                $display("RXDBG time=%0t node=7 port=0 empty=%0d rd_en=%0d dout=%08h ready=%0d consumed=%0d st=%0d crc_res=%08h crc_rcv=%08h sid=%02h did=%02h cnt=%04h plen=%04h tlen=%04h wi=%04h",
                          $time,
                          g_node[7].u_node.u_node_core.rx_empty[0],
                          g_node[7].u_node.u_node_core.rx_rd_en[0],
@@ -302,7 +370,13 @@ module tb_8node_ring;
                          g_node[7].u_node.u_node_core.frame_consumed[0],
                          g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.st,
                          g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.crc_res,
-                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.crc_rcv);
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.crc_rcv,
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.sid,
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.did,
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.cnt,
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.plen,
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.tlen,
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.wi);
             end
 
             if (g_node[1].u_node.u_node_core.frame_ready[1])
@@ -486,6 +560,45 @@ module tb_8node_ring;
             $display("    seen_node7_valid_out      = %0d", seen_node7_valid_out);
             $display("    node4_frame_ready         = %0d", node4_frame_ready);
             $display("    node4_app_rx_frame_valid  = %0d", node4_app_rx_frame_valid);
+            $display("    node1_link_sync_count     = %0d", node1_link_sync_count);
+            $display("    node7_link_sync_count     = %0d", node7_link_sync_count);
+            $display("    node1_rx_sync_count       = %0d", node1_rx_sync_count);
+            $display("    node7_rx_sync_count       = %0d", node7_rx_sync_count);
+            $display("    node1_link_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node1_link_first_words[0], node1_link_first_words[1],
+                     node1_link_first_words[2], node1_link_first_words[3],
+                     node1_link_first_words[4], node1_link_first_words[5],
+                     node1_link_first_words[6], node1_link_first_words[7]);
+            $display("    node1_rx_first_words      = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node1_rx_first_words[0], node1_rx_first_words[1],
+                     node1_rx_first_words[2], node1_rx_first_words[3],
+                     node1_rx_first_words[4], node1_rx_first_words[5],
+                     node1_rx_first_words[6], node1_rx_first_words[7]);
+            $display("    node7_link_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node7_link_first_words[0], node7_link_first_words[1],
+                     node7_link_first_words[2], node7_link_first_words[3],
+                     node7_link_first_words[4], node7_link_first_words[5],
+                     node7_link_first_words[6], node7_link_first_words[7]);
+            $display("    node7_rx_first_words      = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node7_rx_first_words[0], node7_rx_first_words[1],
+                     node7_rx_first_words[2], node7_rx_first_words[3],
+                     node7_rx_first_words[4], node7_rx_first_words[5],
+                     node7_rx_first_words[6], node7_rx_first_words[7]);
+
+            if (((node1_link_first_words[0] == 32'hA31E57BD) &&
+                 (node1_link_first_words[1] == 32'hA31E57BD)) ||
+                ((node7_link_first_words[0] == 32'hA31E57BD) &&
+                 (node7_link_first_words[1] == 32'hA31E57BD))) begin
+                $display("  DIAG detail: TX/link layer already repeats the first word on one first-hop port.");
+            end else if (((node1_rx_first_words[0] == 32'hA31E57BD) &&
+                          (node1_rx_first_words[1] == 32'hA31E57BD)) ||
+                         ((node7_rx_first_words[0] == 32'hA31E57BD) &&
+                          (node7_rx_first_words[1] == 32'hA31E57BD))) begin
+                $display("  DIAG detail: LINKSEQ is clean, but RXSEQ repeats the first word; suspect RX FIFO/FWFT model.");
+            end else if ((node1_link_seq_idx != 0) && (node1_rx_seq_idx != 0) &&
+                         !seen_node1_frame_ready && !seen_node7_frame_ready) begin
+                $display("  DIAG detail: LINKSEQ/RXSEQ do not show first-word duplication; suspect frame_rx FIFO read consumption timing.");
+            end
 
             if (!seen_node1_in1_sync && !seen_node7_in0_sync)
                 $display("  DIAG conclusion: testbench ring link or valid/data pipeline problem.");
@@ -678,6 +791,20 @@ module tb_8node_ring;
         seen_node7_valid_out = 1'b0;
         node4_frame_ready = 1'b0;
         node4_app_rx_frame_valid = 1'b0;
+        node1_link_seq_idx = 0;
+        node7_link_seq_idx = 0;
+        node1_rx_seq_idx = 0;
+        node7_rx_seq_idx = 0;
+        node1_link_sync_count = 0;
+        node7_link_sync_count = 0;
+        node1_rx_sync_count = 0;
+        node7_rx_sync_count = 0;
+        for (n = 0; n < 8; n = n + 1) begin
+            node1_link_first_words[n] = 32'd0;
+            node7_link_first_words[n] = 32'd0;
+            node1_rx_first_words[n] = 32'd0;
+            node7_rx_first_words[n] = 32'd0;
+        end
 
         send_app_frame(0, 8'd4, 4, 32'hA000_0000);
         expected_counts_g[4] = expected_counts_g[4] + 1;
