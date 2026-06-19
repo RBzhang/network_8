@@ -291,6 +291,102 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
 2. 当前双光口工程以 `sources_1/new/node_top.v` 为板级入口检查接口兼容性；扩展更多光口时以 `sources_1/new/node_core.v` 为核心入口配置 `NUM_PORTS`
 3. 先完成单节点环回或双节点最小系统仿真，再扩展到多节点组网验证
 
+## 仿真测试
+
+### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_ring.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 仿真工具 | iverilog 12.0 / Vivado XSim |
+| Yosys 版本 | 0.9 |
+| 测试日期 | 2026-06-19 |
+| RTL 版本 | commit `051ce58` |
+
+### Yosys 综合检查
+
+```
+read_verilog: 22 files 通过
+hierarchy -top node_top: 22 modules
+proc: 通过
+check: 通过 (0 errors, 0 warnings)
+opt:  通过 (1074 changes)
+```
+
+设计统计: 6305 cells, 93650 wire bits, 14 memories (1.3 Mbits)
+
+### 8 节点环形拓扑
+
+```
+Node0 -- Node1 -- Node2 -- Node3 -- Node4 -- Node5 -- Node6 -- Node7 -- (回 Node0)
+
+连接: node[i].out0 → node[(i+1)%8].in1 (顺时针)
+      node[i].out1 → node[(i+7)%8].in0 (逆时针)
+链路: 1 拍 pipeline 寄存
+时钟: 统一 100 MHz (CLK_PERIOD=10 ns)，rx_clk/tx_clk 均接主 clk
+```
+
+### 测试用例
+
+| # | 测试 | 发送方 | 目标 | Payload | 预期 |
+|---|------|--------|------|---------|------|
+| 1 | 单播跨环 | Node0 → Node4 | 4 words (A000_0000..) | Node4 收到，无重复上报 |
+| 2 | 反方向单播 | Node5 → Node1 | 3 words (B000_0000..) | Node1 收到，payload 正确 |
+| 3 | 广播数据包 | Node2 → 0xFF | 2 words (C000_0000..) | 其余 7 节点各收 1 次 |
+| 4 | 连续小包 ×5 | Node0 → Node3 | 1 word ×5 (D000_0000..) | Node3 收 5 个不同 count 包 |
+| 5 | 最大 payload | Node6 → Node7 | 256 words (E000_0000..) | Node7 收完整 256 word，无 len_error |
+
+### 测试结果 (iverilog 12.0, 2026-06-19)
+
+**状态: 阻塞 — TX 通路无输出**
+
+| 检查项 | 结果 |
+|--------|------|
+| iverilog 编译 | 通过 (0 errors) |
+| Yosys 综合检查 | 通过 |
+| 复位/ID 分配 | 通过 (`send_app_frame` 完成握手，`app_frame_done` 正常脉冲) |
+| `network_congested` | 0 (未拥塞) |
+| `valid_out0/valid_out1` (全节点) | **始终为 0 — 无数据输出到环网** |
+| `received_frame_count` (全节点) | 全 0 — 无节点收到任何帧 |
+
+**根本原因分析 (初步):**
+
+测试平台中 `send_app_frame` 任务正确完成了 `app_frame_valid/ready` 握手和 `app_frame_done` 等待，
+帧已由 `tx_enqueue_engine` 写入 per-port `tx_frame_fifo`/`frame_meta_fifo` 队列，
+但 `port_tx_queue_sender` → TX async FIFO → `port_cdc` 输出寄存器 链路上 `valid_out` 始终为 0。
+需要 Vivado 波形级调试定位具体阻塞点。
+
+**排查方向:**
+- `port_tx_queue_sender` 是否进入 S_DROP（超时丢弃）或停在 S_IDLE
+- TX async FIFO 的 `wr_en` / `full` / `empty` 信号状态
+- `port_cdc` 中 `rst_tx_sync` 是否持续拉高阻塞输出
+- `id_locked` 两级同步到 `tx_clk` 域的时序
+
+### 修复的仿真基础设施问题
+
+| 问题 | 修复 |
+|------|------|
+| `sim/ip_stubs.v` 中 `fifo_generator_32_512`/`fifo_generator_sync` 的 `empty` 在 reset 后错误设为 0 | 重写为完整行为模型（格雷码指针 + 两级同步器） |
+| iverilog 不支持 task 数组参数 | 改为模块级全局数组 `expected_counts_g` |
+| `assign_node_ids` 中 `@(negedge rst)` 死等 | 移除，改为相对延时 |
+| `app_payload_data` 重复声明、`generate` 变量名冲突 | 拆分 g_payload / g_node 独立 generate 块 |
+
+### 运行仿真
+
+**iverilog (命令行):**
+```powershell
+cd D:\wurenji\network\gtwizard_0_ex.srcs
+iverilog -g2012 -o sim_build\tb_8node_ring.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v
+vvp sim_build\tb_8node_ring.vvp
+```
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_ring.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_ring`
+3. Run Behavioral Simulation
+4. 在波形中追踪 `u_node[0].u_node_core.g_tx[0].u_port_tx_queue_sender.*` 定位 TX 阻塞点
+
 ## 详细设计
 
 完整设计说明见 [docs/architecture.md](docs/architecture.md)。

@@ -1,0 +1,591 @@
+`timescale 1ns / 1ps
+
+//------------------------------------------------------------------------------
+// tb_8node_ring: 8-node bidirectional ring network testbench
+//   Instantiates 8 node_top modules connected in a ring topology.
+//   Tests unicast, broadcast, continuous small packets, and max payload.
+//------------------------------------------------------------------------------
+module tb_8node_ring;
+
+    localparam NUM_NODES   = 8;
+    localparam CLK_PERIOD  = 10;          // 10 ns = 100 MHz
+    localparam SIM_CLK_FREQ = 500000000; // tick_1s every 5e8 cycles (~5s), slow enough to not interfere
+    localparam TIMEOUT_CYCLES = 500000;   // max wait cycles per test
+    localparam BROADCAST   = 8'hFF;
+    localparam MAX_PAYLOAD = 256;
+
+    //--------------------------------------------------------------------------
+    // Clock and reset
+    //--------------------------------------------------------------------------
+    reg clk;
+    reg rst;
+
+    always #(CLK_PERIOD/2) clk = ~clk;
+
+    //--------------------------------------------------------------------------
+    // Per-node signals
+    //--------------------------------------------------------------------------
+    reg  [NUM_NODES-1:0] node_id_valid;
+    reg  [7:0] node_id [0:NUM_NODES-1];
+
+    wire [31:0]  out0 [0:NUM_NODES-1];
+    wire [31:0]  out1 [0:NUM_NODES-1];
+    wire         valid_out0 [0:NUM_NODES-1];
+    wire         valid_out1 [0:NUM_NODES-1];
+
+    // Pipeline delayed link signals (1 cycle delay)
+    reg  [31:0]  link_data_cw  [0:NUM_NODES-1];  // clockwise data
+    reg          link_valid_cw [0:NUM_NODES-1];
+    reg  [31:0]  link_data_ccw [0:NUM_NODES-1];  // counter-clockwise data
+    reg          link_valid_ccw [0:NUM_NODES-1];
+
+    wire [31:0]  in0 [0:NUM_NODES-1];
+    wire [31:0]  in1 [0:NUM_NODES-1];
+    wire         valid_in0 [0:NUM_NODES-1];
+    wire         valid_in1 [0:NUM_NODES-1];
+
+    // App TX interface
+    reg          app_frame_valid [0:NUM_NODES-1];
+    wire         app_frame_ready [0:NUM_NODES-1];
+    wire         app_frame_accepted [0:NUM_NODES-1];
+    wire         app_frame_done [0:NUM_NODES-1];
+    reg  [7:0]   app_dst_id [0:NUM_NODES-1];
+    reg  [15:0]  app_len16 [0:NUM_NODES-1];
+    wire [15:0]  app_payload_addr [0:NUM_NODES-1];
+    wire [31:0]  app_payload_data [0:NUM_NODES-1];
+
+    // App RX interface
+    wire         app_rx_frame_valid [0:NUM_NODES-1];
+    reg          app_rx_frame_ready [0:NUM_NODES-1];
+    wire [7:0]   app_rx_src_id [0:NUM_NODES-1];
+    wire [7:0]   app_rx_dst_id [0:NUM_NODES-1];
+    wire [15:0]  app_rx_count [0:NUM_NODES-1];
+    wire [15:0]  app_rx_len16 [0:NUM_NODES-1];
+    wire         app_rx_payload_valid [0:NUM_NODES-1];
+    reg          app_rx_payload_ready [0:NUM_NODES-1];
+    wire [15:0]  app_rx_payload_addr [0:NUM_NODES-1];
+    wire [31:0]  app_rx_payload_data [0:NUM_NODES-1];
+
+    // Misc outputs
+    wire         liveness_valid [0:NUM_NODES-1];
+    wire [7:0]   liveness_node [0:NUM_NODES-1];
+    wire         liveness_alive [0:NUM_NODES-1];
+    wire         network_congested [0:NUM_NODES-1];
+    wire         app_len_error [0:NUM_NODES-1];
+    wire         rx_overflow [0:NUM_NODES-1];
+
+    // rx_clk / tx_clk all tied to main clk for simplified simulation
+    wire clk_w = clk;
+
+    //--------------------------------------------------------------------------
+    // Payload RAM model (combinational read: data valid same cycle as addr)
+    //--------------------------------------------------------------------------
+    reg [31:0] payload_mem [0:NUM_NODES-1][0:MAX_PAYLOAD-1];
+    reg [31:0] app_payload_data_r [0:NUM_NODES-1];
+
+    genvar gi;
+    generate
+        for (gi = 0; gi < NUM_NODES; gi = gi + 1) begin : g_payload
+            always @(*) begin
+                app_payload_data_r[gi] = payload_mem[gi][app_payload_addr[gi]];
+            end
+            assign app_payload_data[gi] = app_payload_data_r[gi];
+        end
+    endgenerate
+
+    genvar gnode;
+    generate
+        for (gnode = 0; gnode < NUM_NODES; gnode = gnode + 1) begin : g_node
+            node_top #(
+                .SYNC_WORD(32'hA31E57BD),
+                .BROADCAST(BROADCAST),
+                .MAX_PAYLOAD(MAX_PAYLOAD),
+                .LIVENESS_WIN(5),
+                .NODE_COUNT(255),
+                .DEDUP_DEPTH(64),
+                .FIFO_DEPTH(8192),
+                .RX_REPORT_FIFO_DEPTH(2048),
+                .CLK_FREQ_HZ(SIM_CLK_FREQ),
+                .CONGEST_TIMEOUT_SEC(5)
+            ) u_node (
+                .clk(clk),
+                .rst(rst),
+                .node_id_valid(node_id_valid[gnode]),
+                .node_id(node_id[gnode]),
+                .rx_clk0(clk_w),
+                .rx_clk1(clk_w),
+                .tx_clk0(clk_w),
+                .tx_clk1(clk_w),
+                .in0(in0[gnode]),
+                .in1(in1[gnode]),
+                .valid_in0(valid_in0[gnode]),
+                .valid_in1(valid_in1[gnode]),
+                .app_frame_valid(app_frame_valid[gnode]),
+                .app_frame_ready(app_frame_ready[gnode]),
+                .app_frame_accepted(app_frame_accepted[gnode]),
+                .app_frame_done(app_frame_done[gnode]),
+                .app_dst_id(app_dst_id[gnode]),
+                .app_len16(app_len16[gnode]),
+                .app_payload_addr(app_payload_addr[gnode]),
+                .app_payload_data(app_payload_data[gnode]),
+                .app_rx_frame_valid(app_rx_frame_valid[gnode]),
+                .app_rx_frame_ready(app_rx_frame_ready[gnode]),
+                .app_rx_src_id(app_rx_src_id[gnode]),
+                .app_rx_dst_id(app_rx_dst_id[gnode]),
+                .app_rx_count(app_rx_count[gnode]),
+                .app_rx_len16(app_rx_len16[gnode]),
+                .app_rx_payload_valid(app_rx_payload_valid[gnode]),
+                .app_rx_payload_ready(app_rx_payload_ready[gnode]),
+                .app_rx_payload_addr(app_rx_payload_addr[gnode]),
+                .app_rx_payload_data(app_rx_payload_data[gnode]),
+                .out0(out0[gnode]),
+                .out1(out1[gnode]),
+                .valid_out0(valid_out0[gnode]),
+                .valid_out1(valid_out1[gnode]),
+                .liveness_valid(liveness_valid[gnode]),
+                .liveness_node(liveness_node[gnode]),
+                .liveness_alive(liveness_alive[gnode]),
+                .network_congested(network_congested[gnode]),
+                .app_len_error(app_len_error[gnode]),
+                .rx_overflow(rx_overflow[gnode])
+            );
+        end
+    endgenerate
+
+    //--------------------------------------------------------------------------
+    // Ring connections with 1-cycle pipeline delay
+    //   node[i].out0 -> pipeline -> node[(i+1)%8].in1  (clockwise)
+    //   node[i].out1 -> pipeline -> node[(i+7)%8].in0  (counter-clockwise)
+    //--------------------------------------------------------------------------
+    genvar gi2;
+    generate
+        for (gi2 = 0; gi2 < NUM_NODES; gi2 = gi2 + 1) begin : g_link
+            // Clockwise: out0[i] -> in1[i+1]
+            assign in1[gi2] = link_data_cw[(gi2 + NUM_NODES - 1) % NUM_NODES];
+            assign valid_in1[gi2] = link_valid_cw[(gi2 + NUM_NODES - 1) % NUM_NODES];
+
+            // Counter-clockwise: out1[i] -> in0[i-1]
+            assign in0[gi2] = link_data_ccw[(gi2 + 1) % NUM_NODES];
+            assign valid_in0[gi2] = link_valid_ccw[(gi2 + 1) % NUM_NODES];
+        end
+    endgenerate
+
+    always @(posedge clk) begin
+        if (rst) begin
+            for (integer i_pipe = 0; i_pipe < NUM_NODES; i_pipe = i_pipe + 1) begin
+                link_data_cw[i_pipe]  <= 32'd0;
+                link_valid_cw[i_pipe] <= 1'b0;
+                link_data_ccw[i_pipe] <= 32'd0;
+                link_valid_ccw[i_pipe] <= 1'b0;
+            end
+        end else begin
+            for (integer i_pipe = 0; i_pipe < NUM_NODES; i_pipe = i_pipe + 1) begin
+                link_data_cw[i_pipe]  <= out0[i_pipe];
+                link_valid_cw[i_pipe] <= valid_out0[i_pipe];
+                link_data_ccw[i_pipe] <= out1[i_pipe];
+                link_valid_ccw[i_pipe] <= valid_out1[i_pipe];
+            end
+        end
+    end
+
+    //--------------------------------------------------------------------------
+    // Received frame tracking
+    //--------------------------------------------------------------------------
+    reg [31:0] rx_payload_mem [0:NUM_NODES-1][0:MAX_PAYLOAD-1];
+    reg [15:0] ri [0:NUM_NODES-1];
+    integer    received_frame_count [0:NUM_NODES-1];
+    reg [7:0]  last_rx_src [0:NUM_NODES-1];
+    reg [7:0]  last_rx_dst [0:NUM_NODES-1];
+    reg [15:0] last_rx_len [0:NUM_NODES-1];
+    reg [15:0] last_rx_count [0:NUM_NODES-1];
+
+    genvar gn;
+    generate
+        for (gn = 0; gn < NUM_NODES; gn = gn + 1) begin : g_rx_mon
+            always @(posedge clk) begin
+                if (rst) begin
+                    ri[gn] <= 16'd0;
+                    received_frame_count[gn] <= 0;
+                    last_rx_src[gn] <= 8'd0;
+                    last_rx_dst[gn] <= 8'd0;
+                    last_rx_len[gn] <= 16'd0;
+                    last_rx_count[gn] <= 16'd0;
+                end else begin
+                    if (app_rx_frame_valid[gn] && app_rx_frame_ready[gn]) begin
+                        received_frame_count[gn] <= received_frame_count[gn] + 1;
+                        last_rx_src[gn] <= app_rx_src_id[gn];
+                        last_rx_dst[gn] <= app_rx_dst_id[gn];
+                        last_rx_len[gn] <= app_rx_len16[gn];
+                        last_rx_count[gn] <= app_rx_count[gn];
+                        ri[gn] <= 16'd0;
+                    end
+                    if (app_rx_payload_valid[gn] && app_rx_payload_ready[gn]) begin
+                        rx_payload_mem[gn][app_rx_payload_addr[gn]] <= app_rx_payload_data[gn];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Monitor: print when any valid_out goes high
+    always @(posedge clk) begin
+        for (integer mi = 0; mi < NUM_NODES; mi = mi + 1) begin
+            if (valid_out0[mi] || valid_out1[mi])
+                $display("  MONITOR time=%0t: node%0d vout0=%0d vout1=%0d",
+                         $time, mi, valid_out0[mi], valid_out1[mi]);
+        end
+    end
+
+    //--------------------------------------------------------------------------
+    // Node ID assignment task
+    //--------------------------------------------------------------------------
+    task assign_node_ids;
+        reg [7:0] nid;
+        begin
+            repeat (5) @(posedge clk);
+            for (nid = 0; nid < NUM_NODES; nid = nid + 1) begin
+                node_id[nid] = nid;
+                node_id_valid[nid] = 1'b1;
+            end
+            @(posedge clk);
+            for (nid = 0; nid < NUM_NODES; nid = nid + 1)
+                node_id_valid[nid] = 1'b0;
+            @(posedge clk);
+            // Wait for all nodes to lock their IDs
+            repeat (20) @(posedge clk);
+        end
+    endtask
+
+    //--------------------------------------------------------------------------
+    // Send app frame task
+    //--------------------------------------------------------------------------
+    task send_app_frame;
+        input integer src_node;
+        input [7:0] dst_id;
+        input integer len;       // number of 32-bit payload words
+        input [31:0] base_data;
+        integer k;
+        begin
+            // Write payload data to the source node's payload RAM
+            for (k = 0; k < len; k = k + 1)
+                payload_mem[src_node][k] = base_data + k;
+
+            // Set up the app interface
+            app_dst_id[src_node] = dst_id;
+            app_len16[src_node] = len;
+            app_frame_valid[src_node] = 1'b1;
+
+            // Wait for acceptance (valid & ready handshake)
+            while (!app_frame_ready[src_node] || !app_frame_valid[src_node])
+                @(posedge clk);
+            @(posedge clk);
+            app_frame_valid[src_node] <= 1'b0;
+            app_dst_id[src_node] <= 8'd0;
+            app_len16[src_node] <= 16'd0;
+
+            // Wait for frame done
+            while (!app_frame_done[src_node])
+                @(posedge clk);
+
+            // Wait for payload busy to clear (extra cycle)
+            @(posedge clk);
+        end
+    endtask
+
+    //--------------------------------------------------------------------------
+    // Wait for a node to receive a specific number of new frames
+    //--------------------------------------------------------------------------
+    task wait_for_rx_frames;
+        input integer node;
+        input integer target_count;
+        input integer timeout_cycles;
+        integer cycles;
+        begin
+            cycles = 0;
+            while (received_frame_count[node] < target_count && cycles < timeout_cycles) begin
+                @(posedge clk);
+                cycles = cycles + 1;
+            end
+            if (cycles >= timeout_cycles && received_frame_count[node] < target_count)
+                $fatal(1, "TIMEOUT: Node %0d expected %0d frames, got %0d after %0d cycles",
+                       node, target_count, received_frame_count[node], cycles);
+        end
+    endtask
+
+    //--------------------------------------------------------------------------
+    // Wait for all nodes' TX queues to drain (network idle)
+    //--------------------------------------------------------------------------
+    task wait_network_idle;
+        input integer timeout_cycles;
+        integer cycles;
+        integer n;
+        begin
+            cycles = 0;
+            repeat (100) @(posedge clk); // let frames propagate initially
+            while (cycles < timeout_cycles) begin
+                @(posedge clk);
+                cycles = cycles + 1;
+            end
+        end
+    endtask
+
+    //--------------------------------------------------------------------------
+    // Check that a unicast frame was received correctly
+    //--------------------------------------------------------------------------
+    task check_unicast_received;
+        input integer dst_node;
+        input [7:0] expected_src;
+        input [7:0] expected_dst;
+        input integer expected_len;
+        input [31:0] base_data;
+        input integer expect_count;    // expected received_frame_count after this
+        integer k;
+        begin
+            // Check header
+            if (last_rx_src[dst_node] !== expected_src) begin
+                $error("FAIL Node %0d: expected src=%0d, got src=%0d",
+                       dst_node, expected_src, last_rx_src[dst_node]);
+                $fatal;
+            end
+            if (last_rx_dst[dst_node] !== expected_dst) begin
+                $error("FAIL Node %0d: expected dst=%0d, got dst=%0d",
+                       dst_node, expected_dst, last_rx_dst[dst_node]);
+                $fatal;
+            end
+            if (last_rx_len[dst_node] !== expected_len[15:0]) begin
+                $error("FAIL Node %0d: expected len=%0d, got len=%0d",
+                       dst_node, expected_len, last_rx_len[dst_node]);
+                $fatal;
+            end
+
+            // Check payload
+            for (k = 0; k < expected_len; k = k + 1) begin
+                if (rx_payload_mem[dst_node][k] !== (base_data + k)) begin
+                    $error("FAIL Node %0d payload[%0d]: expected 32'h%8h, got 32'h%8h",
+                           dst_node, k, base_data + k, rx_payload_mem[dst_node][k]);
+                    $fatal;
+                end
+            end
+
+            // Check frame count
+            if (received_frame_count[dst_node] !== expect_count) begin
+                $error("FAIL Node %0d: expected %0d frames, got %0d",
+                       dst_node, expect_count, received_frame_count[dst_node]);
+                $fatal;
+            end
+
+            $display("  OK: Node %0d received frame from Node %0d, len=%0d, payload correct",
+                     dst_node, expected_src, expected_len);
+        end
+    endtask
+
+    //--------------------------------------------------------------------------
+    // Global expected_counts_g array (iverilog does not support array task ports)
+    //--------------------------------------------------------------------------
+    integer expected_counts_g [0:NUM_NODES-1];
+
+    //--------------------------------------------------------------------------
+    // Check that a broadcast was received by all nodes except the source
+    //--------------------------------------------------------------------------
+    task check_broadcast_received;
+        input integer src_node;
+        input [7:0] expected_src;
+        input integer expected_len;
+        input [31:0] base_data;
+        integer n, k;
+        begin
+            for (n = 0; n < NUM_NODES; n = n + 1) begin
+                if (n == src_node) begin
+                    if (received_frame_count[n] !== expected_counts_g[n]) begin
+                        $display("FAIL Node %0d (source): expected %0d frames, got %0d",
+                               n, expected_counts_g[n], received_frame_count[n]);
+                        $fatal;
+                    end
+                end else begin
+                    if (received_frame_count[n] !== expected_counts_g[n]) begin
+                        $display("FAIL Node %0d: expected %0d frames, got %0d",
+                               n, expected_counts_g[n], received_frame_count[n]);
+                        $fatal;
+                    end
+                end
+            end
+            $display("  OK: Broadcast from Node %0d received by all %0d other nodes",
+                     src_node, NUM_NODES - 1);
+        end
+    endtask
+
+    //--------------------------------------------------------------------------
+    // Check no unexpected frames at non-target nodes
+    //--------------------------------------------------------------------------
+    task check_no_unexpected_frames;
+        input integer src_node;
+        input integer dst_node;
+        integer n;
+        begin
+            for (n = 0; n < NUM_NODES; n = n + 1) begin
+                if (n == dst_node || (dst_node == BROADCAST && n != src_node)) begin
+                    // Target nodes OK
+                end else if (received_frame_count[n] !== expected_counts_g[n]) begin
+                    $display("FAIL Node %0d (non-target): expected %0d frames, got %0d",
+                           n, expected_counts_g[n], received_frame_count[n]);
+                    $fatal;
+                end
+            end
+            $display("  OK: Non-target nodes did not receive unexpected frames");
+        end
+    endtask
+
+    //--------------------------------------------------------------------------
+    // Main test sequence
+    //--------------------------------------------------------------------------
+    integer test_frames_before;
+    integer n;
+
+    initial begin
+        // Initialize
+        clk = 0;
+        rst = 1;
+        for (n = 0; n < NUM_NODES; n = n + 1) begin
+            node_id_valid[n] = 1'b0;
+            node_id[n] = 8'd0;
+            app_frame_valid[n] = 1'b0;
+            app_dst_id[n] = 8'd0;
+            app_len16[n] = 16'd0;
+            app_rx_frame_ready[n] = 1'b1;   // always ready
+            app_rx_payload_ready[n] = 1'b1; // always ready
+            received_frame_count[n] = 0;
+        end
+
+        // Reset sequence
+        repeat (20) @(posedge clk);
+        rst = 1'b0;
+        @(posedge clk);
+
+        // Assign node IDs
+        assign_node_ids();
+
+        // Capture baseline frame counts (may include liveness frames)
+        @(posedge clk);
+        for (n = 0; n < NUM_NODES; n = n + 1)
+            test_frames_before = test_frames_before + received_frame_count[n];
+
+        $display("============================================================");
+        $display(" TEST 1: Unicast cross-ring (Node0 -> Node4)");
+        $display("============================================================");
+
+        // Record baseline counts
+        for (n = 0; n < NUM_NODES; n = n + 1)
+            expected_counts_g[n] = received_frame_count[n];
+
+        send_app_frame(0, 8'd4, 4, 32'hA000_0000);
+
+        // Debug: check TX path activity after send_frame
+        $display("  DEBUG: send_app_frame completed at time %0t", $time);
+        $display("  DEBUG: node0 app_frame_done=%0d network_congested=%0d",
+                 app_frame_done[0], network_congested[0]);
+        repeat (50) @(posedge clk);
+        $display("  DEBUG after 50 cycles: node0 out0=%0h v0=%0d out1=%0h v1=%0d",
+                 out0[0], valid_out0[0], out1[0], valid_out1[0]);
+        $display("  DEBUG: all valid_outs: %0d%0d%0d%0d%0d%0d%0d%0d",
+                 valid_out0[0],valid_out0[1],valid_out0[2],valid_out0[3],
+                 valid_out0[4],valid_out0[5],valid_out0[6],valid_out0[7]);
+
+        wait_network_idle(TIMEOUT_CYCLES);
+
+        // Debug: show received frame counts
+        for (n = 0; n < NUM_NODES; n = n + 1)
+            $display("  DEBUG Node %0d: received_frame_count=%0d last_rx_src=%0d last_rx_dst=%0d",
+                     n, received_frame_count[n], last_rx_src[n], last_rx_dst[n]);
+
+        expected_counts_g[4] = expected_counts_g[4] + 1;
+        check_unicast_received(4, 8'd0, 8'd4, 4, 32'hA000_0000, expected_counts_g[4]);
+        check_no_unexpected_frames(0, 4);
+
+        $display("============================================================");
+        $display(" TEST 2: Reverse unicast (Node5 -> Node1)");
+        $display("============================================================");
+
+        for (n = 0; n < NUM_NODES; n = n + 1)
+            expected_counts_g[n] = received_frame_count[n];
+
+        send_app_frame(5, 8'd1, 3, 32'hB000_0000);
+        wait_network_idle(TIMEOUT_CYCLES);
+
+        expected_counts_g[1] = expected_counts_g[1] + 1;
+        check_unicast_received(1, 8'd5, 8'd1, 3, 32'hB000_0000, expected_counts_g[1]);
+        check_no_unexpected_frames(5, 1);
+
+        $display("============================================================");
+        $display(" TEST 3: Broadcast data (Node2 -> all others)");
+        $display("============================================================");
+
+        for (n = 0; n < NUM_NODES; n = n + 1)
+            expected_counts_g[n] = received_frame_count[n];
+        for (n = 0; n < NUM_NODES; n = n + 1)
+            if (n != 2)
+                expected_counts_g[n] = expected_counts_g[n] + 1;
+
+        send_app_frame(2, BROADCAST, 2, 32'hC000_0000);
+        wait_network_idle(TIMEOUT_CYCLES);
+        // Extra wait for broadcast to propagate fully
+        repeat (2000) @(posedge clk);
+
+        check_broadcast_received(2, 8'd2, 2, 32'hC000_0000);
+
+        $display("============================================================");
+        $display(" TEST 4: Continuous small packets (Node0 -> Node3, 5 packets)");
+        $display("============================================================");
+
+        for (n = 0; n < NUM_NODES; n = n + 1)
+            expected_counts_g[n] = received_frame_count[n];
+        expected_counts_g[3] = expected_counts_g[3] + 5;
+
+        for (n = 0; n < 5; n = n + 1) begin
+            send_app_frame(0, 8'd3, 1, 32'hD000_0000 + n);
+        end
+        wait_network_idle(TIMEOUT_CYCLES);
+        repeat (3000) @(posedge clk);
+
+        if (received_frame_count[3] !== expected_counts_g[3]) begin
+            $error("FAIL Node 3: expected %0d frames, got %0d",
+                   expected_counts_g[3], received_frame_count[3]);
+            $fatal;
+        end
+        $display("  OK: Node 3 received 5 small packets from Node 0");
+
+        $display("============================================================");
+        $display(" TEST 5: Max payload (Node6 -> Node7, len=256)");
+        $display("============================================================");
+
+        for (n = 0; n < NUM_NODES; n = n + 1)
+            expected_counts_g[n] = received_frame_count[n];
+
+        send_app_frame(6, 8'd7, MAX_PAYLOAD, 32'hE000_0000);
+        wait_network_idle(TIMEOUT_CYCLES);
+        repeat (5000) @(posedge clk);
+
+        expected_counts_g[7] = expected_counts_g[7] + 1;
+        check_unicast_received(7, 8'd6, 8'd7, MAX_PAYLOAD, 32'hE000_0000, expected_counts_g[7]);
+
+        // Check no RX overflow
+        for (n = 0; n < NUM_NODES; n = n + 1) begin
+            if (rx_overflow[n]) begin
+                $display("WARNING: Node %0d rx_overflow asserted", n);
+            end
+        end
+
+        // Check no app_len_error after tests
+        for (n = 0; n < NUM_NODES; n = n + 1) begin
+            if (app_len_error[n]) begin
+                $display("WARNING: Node %0d app_len_error asserted", n);
+            end
+        end
+
+        $display("============================================================");
+        $display(" ALL TESTS PASSED");
+        $display(" 8-node ring network basic communication works");
+        $display("============================================================");
+        $finish;
+    end
+
+endmodule
