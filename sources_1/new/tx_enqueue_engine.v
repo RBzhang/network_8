@@ -94,7 +94,7 @@ module tx_enqueue_engine #(
     assign payload_is_forward = active_forward;
     assign payload_forward_port = payload_port_r;
     assign network_congested = (st != S_IDLE) ||
-                               (app_frame_valid &&
+                               (
                                 (app_len16 <= MAX_PAYLOAD_WORDS) &&
                                 (app_len16 > 16'd0) &&
                                 !(|app_room_mask));

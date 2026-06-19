@@ -199,6 +199,18 @@ module tb_8node_ring;
     reg [15:0] last_rx_len [0:NUM_NODES-1];
     reg [15:0] last_rx_count [0:NUM_NODES-1];
 
+    // Test 1 layered debug flags
+    reg seen_node1_in1_sync;
+    reg seen_node7_in0_sync;
+    reg seen_node1_frame_ready;
+    reg seen_node7_frame_ready;
+    reg seen_node1_forward_req;
+    reg seen_node7_forward_req;
+    reg seen_node1_valid_out;
+    reg seen_node7_valid_out;
+    reg node4_frame_ready;
+    reg node4_app_rx_frame_valid;
+
     genvar gn;
     generate
         for (gn = 0; gn < NUM_NODES; gn = gn + 1) begin : g_rx_mon
@@ -233,6 +245,134 @@ module tb_8node_ring;
             if (valid_out0[mi] || valid_out1[mi])
                 $display("  MONITOR time=%0t: node%0d vout0=%0d vout1=%0d",
                          $time, mi, valid_out0[mi], valid_out1[mi]);
+        end
+    end
+
+    // First-hop link debug for Test 1:
+    // Node0.out0 -> Node1.in1, Node0.out1 -> Node7.in0.
+    always @(posedge clk) begin
+        if (rst) begin
+            seen_node1_in1_sync <= 1'b0;
+            seen_node7_in0_sync <= 1'b0;
+        end else begin
+            if (valid_in1[1]) begin
+                $display("LINKDBG time=%0t node=1 port=1 data=%08h", $time, in1[1]);
+                if (in1[1] == 32'hA31E57BD)
+                    seen_node1_in1_sync <= 1'b1;
+            end
+            if (valid_in0[7]) begin
+                $display("LINKDBG time=%0t node=7 port=0 data=%08h", $time, in0[7]);
+                if (in0[7] == 32'hA31E57BD)
+                    seen_node7_in0_sync <= 1'b1;
+            end
+        end
+    end
+
+    // RX FIFO / frame_rx debug on first-hop receivers.
+    always @(posedge clk) begin
+        if (rst) begin
+            seen_node1_frame_ready <= 1'b0;
+            seen_node7_frame_ready <= 1'b0;
+            node4_frame_ready <= 1'b0;
+            node4_app_rx_frame_valid <= 1'b0;
+        end else begin
+            if (g_node[1].u_node.u_node_core.rx_rd_en[1] ||
+                g_node[1].u_node.u_node_core.frame_ready[1] ||
+                g_node[1].u_node.u_node_core.frame_consumed[1]) begin
+                $display("RXDBG time=%0t node=1 port=1 empty=%0d rd_en=%0d dout=%08h ready=%0d consumed=%0d st=%0d crc_res=%08h crc_rcv=%08h",
+                         $time,
+                         g_node[1].u_node.u_node_core.rx_empty[1],
+                         g_node[1].u_node.u_node_core.rx_rd_en[1],
+                         g_node[1].u_node.u_node_core.rx_dout_flat[1*32 +: 32],
+                         g_node[1].u_node.u_node_core.frame_ready[1],
+                         g_node[1].u_node.u_node_core.frame_consumed[1],
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.st,
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.crc_res,
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.crc_rcv);
+            end
+            if (g_node[7].u_node.u_node_core.rx_rd_en[0] ||
+                g_node[7].u_node.u_node_core.frame_ready[0] ||
+                g_node[7].u_node.u_node_core.frame_consumed[0]) begin
+                $display("RXDBG time=%0t node=7 port=0 empty=%0d rd_en=%0d dout=%08h ready=%0d consumed=%0d st=%0d crc_res=%08h crc_rcv=%08h",
+                         $time,
+                         g_node[7].u_node.u_node_core.rx_empty[0],
+                         g_node[7].u_node.u_node_core.rx_rd_en[0],
+                         g_node[7].u_node.u_node_core.rx_dout_flat[0*32 +: 32],
+                         g_node[7].u_node.u_node_core.frame_ready[0],
+                         g_node[7].u_node.u_node_core.frame_consumed[0],
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.st,
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.crc_res,
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.crc_rcv);
+            end
+
+            if (g_node[1].u_node.u_node_core.frame_ready[1])
+                seen_node1_frame_ready <= 1'b1;
+            if (g_node[7].u_node.u_node_core.frame_ready[0])
+                seen_node7_frame_ready <= 1'b1;
+            if (|g_node[4].u_node.u_node_core.frame_ready)
+                node4_frame_ready <= 1'b1;
+            if (app_rx_frame_valid[4])
+                node4_app_rx_frame_valid <= 1'b1;
+        end
+    end
+
+    // Forwarding path debug on first-hop receivers.
+    always @(posedge clk) begin
+        if (rst) begin
+            seen_node1_forward_req <= 1'b0;
+            seen_node7_forward_req <= 1'b0;
+            seen_node1_valid_out <= 1'b0;
+            seen_node7_valid_out <= 1'b0;
+        end else begin
+            if (g_node[1].u_node.u_node_core.forward_candidate_valid ||
+                g_node[1].u_node.u_node_core.forward_candidate_done ||
+                g_node[1].u_node.u_node_core.forward_req ||
+                g_node[1].u_node.u_node_core.forward_accept ||
+                g_node[1].u_node.u_node_core.forward_dropped ||
+                |g_node[1].u_node.u_node_core.tx_frame_queue_wr_en ||
+                valid_out0[1] || valid_out1[1]) begin
+                $display("FWDDBG time=%0t node=1 fvalid=%0d fready=%0d fdone=%0d freq=%0d faccept=%0d fdrop=%0d fmask=%b q_wr=%b vout0=%0d vout1=%0d",
+                         $time,
+                         g_node[1].u_node.u_node_core.forward_candidate_valid,
+                         g_node[1].u_node.u_node_core.forward_candidate_ready,
+                         g_node[1].u_node.u_node_core.forward_candidate_done,
+                         g_node[1].u_node.u_node_core.forward_req,
+                         g_node[1].u_node.u_node_core.forward_accept,
+                         g_node[1].u_node.u_node_core.forward_dropped,
+                         g_node[1].u_node.u_node_core.forward_port_mask,
+                         g_node[1].u_node.u_node_core.tx_frame_queue_wr_en,
+                         valid_out0[1],
+                         valid_out1[1]);
+            end
+            if (g_node[7].u_node.u_node_core.forward_candidate_valid ||
+                g_node[7].u_node.u_node_core.forward_candidate_done ||
+                g_node[7].u_node.u_node_core.forward_req ||
+                g_node[7].u_node.u_node_core.forward_accept ||
+                g_node[7].u_node.u_node_core.forward_dropped ||
+                |g_node[7].u_node.u_node_core.tx_frame_queue_wr_en ||
+                valid_out0[7] || valid_out1[7]) begin
+                $display("FWDDBG time=%0t node=7 fvalid=%0d fready=%0d fdone=%0d freq=%0d faccept=%0d fdrop=%0d fmask=%b q_wr=%b vout0=%0d vout1=%0d",
+                         $time,
+                         g_node[7].u_node.u_node_core.forward_candidate_valid,
+                         g_node[7].u_node.u_node_core.forward_candidate_ready,
+                         g_node[7].u_node.u_node_core.forward_candidate_done,
+                         g_node[7].u_node.u_node_core.forward_req,
+                         g_node[7].u_node.u_node_core.forward_accept,
+                         g_node[7].u_node.u_node_core.forward_dropped,
+                         g_node[7].u_node.u_node_core.forward_port_mask,
+                         g_node[7].u_node.u_node_core.tx_frame_queue_wr_en,
+                         valid_out0[7],
+                         valid_out1[7]);
+            end
+
+            if (g_node[1].u_node.u_node_core.forward_req)
+                seen_node1_forward_req <= 1'b1;
+            if (g_node[7].u_node.u_node_core.forward_req)
+                seen_node7_forward_req <= 1'b1;
+            if (valid_out0[1] || valid_out1[1])
+                seen_node1_valid_out <= 1'b1;
+            if (valid_out0[7] || valid_out1[7])
+                seen_node7_valid_out <= 1'b1;
         end
     end
 
@@ -309,6 +449,56 @@ module tb_8node_ring;
             if (cycles >= timeout_cycles && received_frame_count[node] < target_count)
                 $fatal(1, "TIMEOUT: Node %0d expected %0d frames, got %0d after %0d cycles",
                        node, target_count, received_frame_count[node], cycles);
+        end
+    endtask
+
+    task wait_for_rx_frames_no_fatal;
+        input integer node;
+        input integer target_count;
+        input integer timeout_cycles;
+        output integer timed_out;
+        integer cycles;
+        begin
+            cycles = 0;
+            timed_out = 0;
+            while (received_frame_count[node] < target_count && cycles < timeout_cycles) begin
+                @(posedge clk);
+                cycles = cycles + 1;
+            end
+            if (cycles >= timeout_cycles && received_frame_count[node] < target_count) begin
+                timed_out = 1;
+                $display("TIMEOUT: Node %0d expected %0d frames, got %0d after %0d cycles",
+                         node, target_count, received_frame_count[node], cycles);
+            end
+        end
+    endtask
+
+    task print_test1_diagnostic;
+        begin
+            $display("  DIAG Test1 summary:");
+            $display("    seen_node1_in1_sync       = %0d", seen_node1_in1_sync);
+            $display("    seen_node7_in0_sync       = %0d", seen_node7_in0_sync);
+            $display("    seen_node1_frame_ready    = %0d", seen_node1_frame_ready);
+            $display("    seen_node7_frame_ready    = %0d", seen_node7_frame_ready);
+            $display("    seen_node1_forward_req    = %0d", seen_node1_forward_req);
+            $display("    seen_node7_forward_req    = %0d", seen_node7_forward_req);
+            $display("    seen_node1_valid_out      = %0d", seen_node1_valid_out);
+            $display("    seen_node7_valid_out      = %0d", seen_node7_valid_out);
+            $display("    node4_frame_ready         = %0d", node4_frame_ready);
+            $display("    node4_app_rx_frame_valid  = %0d", node4_app_rx_frame_valid);
+
+            if (!seen_node1_in1_sync && !seen_node7_in0_sync)
+                $display("  DIAG conclusion: testbench ring link or valid/data pipeline problem.");
+            else if (!seen_node1_frame_ready && !seen_node7_frame_ready)
+                $display("  DIAG conclusion: RX FIFO/frame_rx/CRC parse problem; inspect frame_rx.st, crc_res, crc_rcv.");
+            else if (!seen_node1_forward_req && !seen_node7_forward_req)
+                $display("  DIAG conclusion: rx_dispatcher/forward_engine entry problem.");
+            else if (!seen_node1_valid_out && !seen_node7_valid_out)
+                $display("  DIAG conclusion: forward enqueue or TX sender problem.");
+            else if (!node4_app_rx_frame_valid)
+                $display("  DIAG conclusion: multi-hop propagation or Node4 local report path problem.");
+            else
+                $display("  DIAG conclusion: Node4 app_rx became valid but received counter/checker did not complete.");
         end
     endtask
 
@@ -440,6 +630,7 @@ module tb_8node_ring;
     //--------------------------------------------------------------------------
     integer test_frames_before;
     integer n;
+    integer test1_timed_out;
 
     initial begin
         // Initialize
@@ -477,7 +668,19 @@ module tb_8node_ring;
         for (n = 0; n < NUM_NODES; n = n + 1)
             expected_counts_g[n] = received_frame_count[n];
 
+        seen_node1_in1_sync = 1'b0;
+        seen_node7_in0_sync = 1'b0;
+        seen_node1_frame_ready = 1'b0;
+        seen_node7_frame_ready = 1'b0;
+        seen_node1_forward_req = 1'b0;
+        seen_node7_forward_req = 1'b0;
+        seen_node1_valid_out = 1'b0;
+        seen_node7_valid_out = 1'b0;
+        node4_frame_ready = 1'b0;
+        node4_app_rx_frame_valid = 1'b0;
+
         send_app_frame(0, 8'd4, 4, 32'hA000_0000);
+        expected_counts_g[4] = expected_counts_g[4] + 1;
 
         // Debug: check TX path activity after send_frame
         $display("  DEBUG: send_app_frame completed at time %0t", $time);
@@ -490,14 +693,19 @@ module tb_8node_ring;
                  valid_out0[0],valid_out0[1],valid_out0[2],valid_out0[3],
                  valid_out0[4],valid_out0[5],valid_out0[6],valid_out0[7]);
 
-        wait_network_idle(TIMEOUT_CYCLES);
+        wait_for_rx_frames_no_fatal(4, expected_counts_g[4], TIMEOUT_CYCLES, test1_timed_out);
 
         // Debug: show received frame counts
         for (n = 0; n < NUM_NODES; n = n + 1)
             $display("  DEBUG Node %0d: received_frame_count=%0d last_rx_src=%0d last_rx_dst=%0d",
                      n, received_frame_count[n], last_rx_src[n], last_rx_dst[n]);
 
-        expected_counts_g[4] = expected_counts_g[4] + 1;
+        if (test1_timed_out) begin
+            $display("Node4 未收到任何 app_rx 帧");
+            print_test1_diagnostic();
+            $fatal(1, "TEST 1 failed before checking last_rx fields");
+        end
+
         check_unicast_received(4, 8'd0, 8'd4, 4, 32'hA000_0000, expected_counts_g[4]);
         check_no_unexpected_frames(0, 4);
 
@@ -587,5 +795,26 @@ module tb_8node_ring;
         $display("============================================================");
         $finish;
     end
+    always @(posedge clk) begin
+    if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en != 0 ||
+        g_node[0].u_node.u_node_core.tx_frame_meta_wr_en != 0 ||
+        g_node[0].u_node.u_node_core.tx_wr_en != 0 ||
+        valid_out0[0] || valid_out1[0]) begin
 
+        $display("TXDBG t=%0t q_wr=%b meta_wr=%b q_empty=%b meta_empty=%b q_rd=%b meta_rd=%b tx_wr=%b tx_full=%b tx_empty=%b vout=%b%b",
+            $time,
+            g_node[0].u_node.u_node_core.tx_frame_queue_wr_en,
+            g_node[0].u_node.u_node_core.tx_frame_meta_wr_en,
+            g_node[0].u_node.u_node_core.tx_frame_queue_empty,
+            g_node[0].u_node.u_node_core.tx_frame_meta_empty,
+            g_node[0].u_node.u_node_core.tx_frame_queue_rd_en,
+            g_node[0].u_node.u_node_core.tx_frame_meta_rd_en,
+            g_node[0].u_node.u_node_core.tx_wr_en,
+            g_node[0].u_node.u_node_core.tx_full,
+            g_node[0].u_node.u_node_core.tx_empty,
+            valid_out0[0],
+            valid_out1[0]
+        );
+    end
+end
 endmodule

@@ -399,3 +399,20 @@ vvp sim_build\tb_8node_ring.vvp
 4. 生存状态帧数据不随复位清零，不受复位控制
 5. 向多个发送端口写入同一个帧前，使用每端口 `tx_frame_fifo` 的 `data_count` 检查整帧空间；空间不足的端口跳过，不写入半帧
 6. `network_congested` 按当前上层 `app_len16 + 4` 判断完整帧空间，禁止上层写入当前无端口可容纳的新包并暂停 RX 继续读入；当前转发包所有目标端口都不可用时返回 `forward_dropped`
+
+## 本次修改范围
+
+- `tx_enqueue_engine.v`：把 `network_congested` 从“按最大帧空间预检”改成“按当前 `app_len16 + 4` 真实帧长预检”，并保留 `local_room_mask` 作为本地请求的实际入队目标选择。
+- `node_core.v`：补接 `app_frame_valid` / `app_len16` 到 `tx_enqueue_engine`。
+- `tb_8node_ring.v`：修复 Test 1 检查流程，加入 `LINKDBG` / `RXDBG` / `FWDDBG` 分层调试和自动诊断摘要。
+- `docs/architecture.md`：同步记录 `network_congested` 的新语义。
+
+## 本次仿真结论
+
+- `iverilog -g2012 -o sim_build/tb_8node_ring.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`：通过。
+- `vvp sim_build/tb_8node_ring.vvp`：Test 1 超时失败，但已不再误查 `last_rx_*`，会先打印 `Node4 未收到任何 app_rx 帧` 再输出诊断。
+- `LINKDBG`：Node1 / Node7 的第一跳都看到了 `0xA31E57BD`，说明环网连线和首拍数据确实到达 RX 侧。
+- `RXDBG`：Node1 / Node7 的 `frame_rx` 没有拉起 `frame_ready`，且 `crc_res` / `crc_rcv` 不一致。
+- 自动诊断结论：`RX FIFO/frame_rx/CRC parse problem; inspect frame_rx.st, crc_res, crc_rcv.`
+
+这说明当前失败点更靠近 RX 解析链路，而不是 Test 1 的判定逻辑本身。
