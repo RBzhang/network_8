@@ -453,6 +453,26 @@ vvp sim_build\tb_8node_ring.vvp
 
 建议的最小 RTL 修复方向是只改 `port_tx_queue_sender.v` 的读写协议：不要在拉起 `frame_rd_en` 的同一个周期直接把当前 `frame_dout` 写入 TX FIFO；应把 FIFO 读出 word 先锁存成一拍有效数据，再用该锁存数据产生 `tx_wr_en/tx_din`。这样可以避免同步 FIFO 的注册读使能让 sender 消费到上一拍队头 word。协议格式、`frame_rx`、CRC 和 per-port FIFO 结构暂时不需要改。
 
+## port_tx_queue_sender 修复后验证
+
+已修复 `port_tx_queue_sender.v` 的读写时序：状态机从原先在同一拍 `frame_rd_en + tx_wr_en + tx_din <= frame_dout`，改为 `S_IDLE -> S_LOAD -> S_WRITE`。`S_LOAD` 只从 `tx_frame_fifo` 取 word 并预置 `tx_din/word_buf`，`S_WRITE` 在下一拍且 `!tx_full` 时才拉高 `tx_wr_en`。若 `tx_full=1`，`word_valid` 和 `tx_din` 保持不变；最后一个 word 成功写入 TX FIFO 后才拉高 `meta_rd_en`。`S_DROP` 仍只用于尚未开始发送的队首帧超时丢弃，不写 TX FIFO。
+
+两组 iverilog 编译均通过：
+
+- stub 模式：`iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`
+- 行为 FIFO 模式：`iverilog -g2012 -DIVERILOG_BEHAV_FIFO -o sim_build/tb_8node_ring_behav.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`
+
+两组 `vvp` 均不再卡在 Test 1。Test 1 `Node0 -> Node4` 已通过，`TXWRSEQ` 已与 `QSEQ` 对齐：
+
+- `ENQSEQ`: `a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003 527e65fd`
+- `QSEQ`: `a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003 527e65fd`
+- `TXWRSEQ`: `a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003 527e65fd`
+- `TXFIFOSEQ`: `a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003 527e65fd`
+- `OUTSEQ`: `a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003 527e65fd`
+- `LINKSEQ/RXSEQ`: `a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003 527e65fd`
+
+完整 5 项测试尚未全部通过：Test 2 `Node5 -> Node1` 暴露新的失败点，Node1 最终检查到 `expected len=3, got len=1281`。日志显示第一份转发帧可以按 `05010000 00030000 b0000000 b0000001 b0000002 3ba7f20a` 到达 Node1，但随后又出现第二份同源同 count 的重复转发帧，其中 Node0 转发侧 `QSEQ/TXWRSEQ` payload 变成 `00000000 00000000 00000000`。该问题已经超出本轮 `port_tx_queue_sender` 同拍写修复范围，下一步应单独检查转发去重和 `tx_enqueue_engine` 读取 forward payload 时的 `payload_index/payload_data` 稳定时序。
+
 ## 发布脚本
 
 仓库新增了一个 PowerShell 发布脚本：[`scripts/publish_to_main.ps1`](scripts/publish_to_main.ps1)。

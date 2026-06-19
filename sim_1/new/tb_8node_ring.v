@@ -265,6 +265,7 @@ module tb_8node_ring;
                     end
                     if (app_rx_payload_valid[gn] && app_rx_payload_ready[gn]) begin
                         rx_payload_mem[gn][app_rx_payload_addr[gn]] <= app_rx_payload_data[gn];
+                        ri[gn] <= app_rx_payload_addr[gn] + 1'b1;
                     end
                 end
             end
@@ -877,6 +878,7 @@ module tb_8node_ring;
         input [31:0] base_data;
         input integer expect_count;    // expected received_frame_count after this
         integer k;
+        integer cycles;
         begin
             // Check header
             if (last_rx_src[dst_node] !== expected_src) begin
@@ -892,6 +894,18 @@ module tb_8node_ring;
             if (last_rx_len[dst_node] !== expected_len[15:0]) begin
                 $error("FAIL Node %0d: expected len=%0d, got len=%0d",
                        dst_node, expected_len, last_rx_len[dst_node]);
+                $fatal;
+            end
+
+            cycles = 0;
+            while ((expected_len > 0) && (ri[dst_node] < expected_len[15:0]) &&
+                   (cycles < TIMEOUT_CYCLES)) begin
+                @(posedge clk);
+                cycles = cycles + 1;
+            end
+            if ((expected_len > 0) && (ri[dst_node] < expected_len[15:0])) begin
+                $error("FAIL Node %0d: expected %0d payload words, got %0d",
+                       dst_node, expected_len, ri[dst_node]);
                 $fatal;
             end
 

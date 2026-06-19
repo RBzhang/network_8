@@ -24,13 +24,17 @@ module port_tx_queue_sender #(
     output reg  [31:0] tx_din,
     output reg         timeout_drop
 );
-    localparam [1:0] S_IDLE = 2'd0;
-    localparam [1:0] S_SEND = 2'd1;
-    localparam [1:0] S_DROP = 2'd2;
+    localparam [1:0] S_IDLE  = 2'd0;
+    localparam [1:0] S_LOAD  = 2'd1;
+    localparam [1:0] S_WRITE = 2'd2;
+    localparam [1:0] S_DROP  = 2'd3;
     localparam [TIME_W-1:0] TIMEOUT_CYCLES = TX_QUEUE_TIMEOUT_CYCLES;
 
     reg [1:0] st;
     reg [15:0] words_left;
+    reg [31:0] word_buf;
+    reg        word_valid;
+    reg        word_last;
     wire [15:0] meta_frame_words = meta_dout[15:0];
     wire [TIME_W-1:0] meta_enqueue_time = meta_dout[TIME_W+15:16];
     wire timeout_hit = (TIMEOUT_CYCLES != {TIME_W{1'b0}}) &&
@@ -45,6 +49,9 @@ module port_tx_queue_sender #(
             tx_wr_en <= 1'b0;
             tx_din <= 32'd0;
             timeout_drop <= 1'b0;
+            word_buf <= 32'd0;
+            word_valid <= 1'b0;
+            word_last <= 1'b0;
         end else begin
             frame_rd_en <= 1'b0;
             meta_rd_en <= 1'b0;
@@ -54,36 +61,47 @@ module port_tx_queue_sender #(
             case (st)
                 S_IDLE: begin
                     words_left <= 16'd0;
+                    word_valid <= 1'b0;
+                    word_last <= 1'b0;
                     if (!meta_empty) begin
                         if (timeout_hit) begin
                             words_left <= meta_frame_words;
                             st <= S_DROP;
-                        end else if (!frame_empty && !tx_full) begin
-                            tx_din <= frame_dout[31:0];
-                            tx_wr_en <= 1'b1;
-                            frame_rd_en <= 1'b1;
-                            if (meta_frame_words <= 16'd1) begin
-                                meta_rd_en <= 1'b1;
-                                st <= S_IDLE;
-                            end else begin
-                                words_left <= meta_frame_words - 1'b1;
-                                st <= S_SEND;
-                            end
+                        end else if (!frame_empty) begin
+                            words_left <= meta_frame_words;
+                            st <= S_LOAD;
                         end
                     end
                 end
 
-                S_SEND: begin
-                    if (!frame_empty && !tx_full) begin
+                S_LOAD: begin
+                    if (!frame_empty) begin
+                        word_buf <= frame_dout[31:0];
                         tx_din <= frame_dout[31:0];
-                        tx_wr_en <= 1'b1;
+                        word_valid <= 1'b1;
+                        word_last <= (words_left <= 16'd1);
                         frame_rd_en <= 1'b1;
-                        if (words_left <= 16'd1) begin
-                            meta_rd_en <= 1'b1;
+                        if (words_left <= 16'd1)
                             words_left <= 16'd0;
-                            st <= S_IDLE;
-                        end else begin
+                        else
                             words_left <= words_left - 1'b1;
+                        st <= S_WRITE;
+                    end
+                end
+
+                S_WRITE: begin
+                    if (word_valid) begin
+                        tx_din <= word_buf;
+                        if (!tx_full) begin
+                            tx_wr_en <= 1'b1;
+                            word_valid <= 1'b0;
+                            if (word_last) begin
+                                meta_rd_en <= 1'b1;
+                                word_last <= 1'b0;
+                                st <= S_IDLE;
+                            end else begin
+                                st <= S_LOAD;
+                            end
                         end
                     end
                 end
