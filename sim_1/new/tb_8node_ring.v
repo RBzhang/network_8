@@ -218,10 +218,30 @@ module tb_8node_ring;
     integer node7_link_sync_count;
     integer node1_rx_sync_count;
     integer node7_rx_sync_count;
+    integer node0_enq_port0_seq_idx;
+    integer node0_enq_port1_seq_idx;
+    integer node0_q_port0_seq_idx;
+    integer node0_q_port1_seq_idx;
+    integer node0_txwr_port0_seq_idx;
+    integer node0_txwr_port1_seq_idx;
+    integer node0_txfifo_port0_seq_idx;
+    integer node0_txfifo_port1_seq_idx;
+    integer node0_out_port0_seq_idx;
+    integer node0_out_port1_seq_idx;
     reg [31:0] node1_link_first_words [0:7];
     reg [31:0] node7_link_first_words [0:7];
     reg [31:0] node1_rx_first_words [0:7];
     reg [31:0] node7_rx_first_words [0:7];
+    reg [31:0] node0_enq_port0_first_words [0:7];
+    reg [31:0] node0_enq_port1_first_words [0:7];
+    reg [31:0] node0_q_port0_first_words [0:7];
+    reg [31:0] node0_q_port1_first_words [0:7];
+    reg [31:0] node0_txwr_port0_first_words [0:7];
+    reg [31:0] node0_txwr_port1_first_words [0:7];
+    reg [31:0] node0_txfifo_port0_first_words [0:7];
+    reg [31:0] node0_txfifo_port1_first_words [0:7];
+    reg [31:0] node0_out_port0_first_words [0:7];
+    reg [31:0] node0_out_port1_first_words [0:7];
 
     genvar gn;
     generate
@@ -257,6 +277,133 @@ module tb_8node_ring;
             if (valid_out0[mi] || valid_out1[mi])
                 $display("  MONITOR time=%0t: node%0d vout0=%0d vout1=%0d",
                          $time, mi, valid_out0[mi], valid_out1[mi]);
+        end
+    end
+
+    // Node0 TX-side sequence debug for Test 1.
+    always @(posedge clk) begin
+        if (rst) begin
+            node0_enq_port0_seq_idx <= 0;
+            node0_enq_port1_seq_idx <= 0;
+            node0_q_port0_seq_idx <= 0;
+            node0_q_port1_seq_idx <= 0;
+            node0_txwr_port0_seq_idx <= 0;
+            node0_txwr_port1_seq_idx <= 0;
+            node0_txfifo_port0_seq_idx <= 0;
+            node0_txfifo_port1_seq_idx <= 0;
+            node0_out_port0_seq_idx <= 0;
+            node0_out_port1_seq_idx <= 0;
+            for (integer tx_rst_i = 0; tx_rst_i < 8; tx_rst_i = tx_rst_i + 1) begin
+                node0_enq_port0_first_words[tx_rst_i] <= 32'd0;
+                node0_enq_port1_first_words[tx_rst_i] <= 32'd0;
+                node0_q_port0_first_words[tx_rst_i] <= 32'd0;
+                node0_q_port1_first_words[tx_rst_i] <= 32'd0;
+                node0_txwr_port0_first_words[tx_rst_i] <= 32'd0;
+                node0_txwr_port1_first_words[tx_rst_i] <= 32'd0;
+                node0_txfifo_port0_first_words[tx_rst_i] <= 32'd0;
+                node0_txfifo_port1_first_words[tx_rst_i] <= 32'd0;
+                node0_out_port0_first_words[tx_rst_i] <= 32'd0;
+                node0_out_port1_first_words[tx_rst_i] <= 32'd0;
+            end
+        end else begin
+            if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en[0]) begin
+                $display("ENQSEQ node=0 port=0 idx=%0d sof=%0d eof=%0d data=%08h",
+                         node0_enq_port0_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 + 33],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 + 32],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 32]);
+                if (node0_enq_port0_seq_idx < 8)
+                    node0_enq_port0_first_words[node0_enq_port0_seq_idx] <=
+                        g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 32];
+                node0_enq_port0_seq_idx <= node0_enq_port0_seq_idx + 1;
+            end
+            if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en[1]) begin
+                $display("ENQSEQ node=0 port=1 idx=%0d sof=%0d eof=%0d data=%08h",
+                         node0_enq_port1_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 + 33],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 + 32],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 +: 32]);
+                if (node0_enq_port1_seq_idx < 8)
+                    node0_enq_port1_first_words[node0_enq_port1_seq_idx] <=
+                        g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 +: 32];
+                node0_enq_port1_seq_idx <= node0_enq_port1_seq_idx + 1;
+            end
+
+            if (g_node[0].u_node.u_node_core.tx_frame_queue_rd_en[0]) begin
+                $display("QSEQ node=0 port=0 idx=%0d sof=%0d eof=%0d data=%08h",
+                         node0_q_port0_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 + 33],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 + 32],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 +: 32]);
+                if (node0_q_port0_seq_idx < 8)
+                    node0_q_port0_first_words[node0_q_port0_seq_idx] <=
+                        g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 +: 32];
+                node0_q_port0_seq_idx <= node0_q_port0_seq_idx + 1;
+            end
+            if (g_node[0].u_node.u_node_core.tx_frame_queue_rd_en[1]) begin
+                $display("QSEQ node=0 port=1 idx=%0d sof=%0d eof=%0d data=%08h",
+                         node0_q_port1_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 + 33],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 + 32],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 +: 32]);
+                if (node0_q_port1_seq_idx < 8)
+                    node0_q_port1_first_words[node0_q_port1_seq_idx] <=
+                        g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 +: 32];
+                node0_q_port1_seq_idx <= node0_q_port1_seq_idx + 1;
+            end
+
+            if (g_node[0].u_node.u_node_core.tx_wr_en[0]) begin
+                $display("TXWRSEQ node=0 port=0 idx=%0d data=%08h",
+                         node0_txwr_port0_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_din_flat[0*32 +: 32]);
+                if (node0_txwr_port0_seq_idx < 8)
+                    node0_txwr_port0_first_words[node0_txwr_port0_seq_idx] <=
+                        g_node[0].u_node.u_node_core.tx_din_flat[0*32 +: 32];
+                node0_txwr_port0_seq_idx <= node0_txwr_port0_seq_idx + 1;
+            end
+            if (g_node[0].u_node.u_node_core.tx_wr_en[1]) begin
+                $display("TXWRSEQ node=0 port=1 idx=%0d data=%08h",
+                         node0_txwr_port1_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_din_flat[1*32 +: 32]);
+                if (node0_txwr_port1_seq_idx < 8)
+                    node0_txwr_port1_first_words[node0_txwr_port1_seq_idx] <=
+                        g_node[0].u_node.u_node_core.tx_din_flat[1*32 +: 32];
+                node0_txwr_port1_seq_idx <= node0_txwr_port1_seq_idx + 1;
+            end
+
+            if (!g_node[0].u_node.u_node_core.tx_empty[0]) begin
+                $display("TXFIFOSEQ node=0 port=0 idx=%0d data=%08h",
+                         node0_txfifo_port0_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_dout_flat[0*32 +: 32]);
+                if (node0_txfifo_port0_seq_idx < 8)
+                    node0_txfifo_port0_first_words[node0_txfifo_port0_seq_idx] <=
+                        g_node[0].u_node.u_node_core.tx_dout_flat[0*32 +: 32];
+                node0_txfifo_port0_seq_idx <= node0_txfifo_port0_seq_idx + 1;
+            end
+            if (!g_node[0].u_node.u_node_core.tx_empty[1]) begin
+                $display("TXFIFOSEQ node=0 port=1 idx=%0d data=%08h",
+                         node0_txfifo_port1_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_dout_flat[1*32 +: 32]);
+                if (node0_txfifo_port1_seq_idx < 8)
+                    node0_txfifo_port1_first_words[node0_txfifo_port1_seq_idx] <=
+                        g_node[0].u_node.u_node_core.tx_dout_flat[1*32 +: 32];
+                node0_txfifo_port1_seq_idx <= node0_txfifo_port1_seq_idx + 1;
+            end
+
+            if (valid_out0[0]) begin
+                $display("OUTSEQ node=0 port=0 idx=%0d data=%08h",
+                         node0_out_port0_seq_idx, out0[0]);
+                if (node0_out_port0_seq_idx < 8)
+                    node0_out_port0_first_words[node0_out_port0_seq_idx] <= out0[0];
+                node0_out_port0_seq_idx <= node0_out_port0_seq_idx + 1;
+            end
+            if (valid_out1[0]) begin
+                $display("OUTSEQ node=0 port=1 idx=%0d data=%08h",
+                         node0_out_port1_seq_idx, out1[0]);
+                if (node0_out_port1_seq_idx < 8)
+                    node0_out_port1_first_words[node0_out_port1_seq_idx] <= out1[0];
+                node0_out_port1_seq_idx <= node0_out_port1_seq_idx + 1;
+            end
         end
     end
 
@@ -564,6 +711,56 @@ module tb_8node_ring;
             $display("    node7_link_sync_count     = %0d", node7_link_sync_count);
             $display("    node1_rx_sync_count       = %0d", node1_rx_sync_count);
             $display("    node7_rx_sync_count       = %0d", node7_rx_sync_count);
+            $display("    node0_enq_port0_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_enq_port0_first_words[0], node0_enq_port0_first_words[1],
+                     node0_enq_port0_first_words[2], node0_enq_port0_first_words[3],
+                     node0_enq_port0_first_words[4], node0_enq_port0_first_words[5],
+                     node0_enq_port0_first_words[6], node0_enq_port0_first_words[7]);
+            $display("    node0_enq_port1_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_enq_port1_first_words[0], node0_enq_port1_first_words[1],
+                     node0_enq_port1_first_words[2], node0_enq_port1_first_words[3],
+                     node0_enq_port1_first_words[4], node0_enq_port1_first_words[5],
+                     node0_enq_port1_first_words[6], node0_enq_port1_first_words[7]);
+            $display("    node0_q_port0_first_words      = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_q_port0_first_words[0], node0_q_port0_first_words[1],
+                     node0_q_port0_first_words[2], node0_q_port0_first_words[3],
+                     node0_q_port0_first_words[4], node0_q_port0_first_words[5],
+                     node0_q_port0_first_words[6], node0_q_port0_first_words[7]);
+            $display("    node0_q_port1_first_words      = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_q_port1_first_words[0], node0_q_port1_first_words[1],
+                     node0_q_port1_first_words[2], node0_q_port1_first_words[3],
+                     node0_q_port1_first_words[4], node0_q_port1_first_words[5],
+                     node0_q_port1_first_words[6], node0_q_port1_first_words[7]);
+            $display("    node0_txwr_port0_first_words   = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_txwr_port0_first_words[0], node0_txwr_port0_first_words[1],
+                     node0_txwr_port0_first_words[2], node0_txwr_port0_first_words[3],
+                     node0_txwr_port0_first_words[4], node0_txwr_port0_first_words[5],
+                     node0_txwr_port0_first_words[6], node0_txwr_port0_first_words[7]);
+            $display("    node0_txwr_port1_first_words   = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_txwr_port1_first_words[0], node0_txwr_port1_first_words[1],
+                     node0_txwr_port1_first_words[2], node0_txwr_port1_first_words[3],
+                     node0_txwr_port1_first_words[4], node0_txwr_port1_first_words[5],
+                     node0_txwr_port1_first_words[6], node0_txwr_port1_first_words[7]);
+            $display("    node0_txfifo_port0_first_words = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_txfifo_port0_first_words[0], node0_txfifo_port0_first_words[1],
+                     node0_txfifo_port0_first_words[2], node0_txfifo_port0_first_words[3],
+                     node0_txfifo_port0_first_words[4], node0_txfifo_port0_first_words[5],
+                     node0_txfifo_port0_first_words[6], node0_txfifo_port0_first_words[7]);
+            $display("    node0_txfifo_port1_first_words = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_txfifo_port1_first_words[0], node0_txfifo_port1_first_words[1],
+                     node0_txfifo_port1_first_words[2], node0_txfifo_port1_first_words[3],
+                     node0_txfifo_port1_first_words[4], node0_txfifo_port1_first_words[5],
+                     node0_txfifo_port1_first_words[6], node0_txfifo_port1_first_words[7]);
+            $display("    node0_out_port0_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_out_port0_first_words[0], node0_out_port0_first_words[1],
+                     node0_out_port0_first_words[2], node0_out_port0_first_words[3],
+                     node0_out_port0_first_words[4], node0_out_port0_first_words[5],
+                     node0_out_port0_first_words[6], node0_out_port0_first_words[7]);
+            $display("    node0_out_port1_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     node0_out_port1_first_words[0], node0_out_port1_first_words[1],
+                     node0_out_port1_first_words[2], node0_out_port1_first_words[3],
+                     node0_out_port1_first_words[4], node0_out_port1_first_words[5],
+                     node0_out_port1_first_words[6], node0_out_port1_first_words[7]);
             $display("    node1_link_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
                      node1_link_first_words[0], node1_link_first_words[1],
                      node1_link_first_words[2], node1_link_first_words[3],
@@ -585,6 +782,38 @@ module tb_8node_ring;
                      node7_rx_first_words[4], node7_rx_first_words[5],
                      node7_rx_first_words[6], node7_rx_first_words[7]);
 
+            if (((node0_enq_port0_first_words[0] == 32'hA31E57BD) &&
+                 (node0_enq_port0_first_words[1] == 32'hA31E57BD)) ||
+                ((node0_enq_port1_first_words[0] == 32'hA31E57BD) &&
+                 (node0_enq_port1_first_words[1] == 32'hA31E57BD))) begin
+                $display("  DIAG TX detail: tx_enqueue_engine or tx_frame_fifo write side repeats SYNC.");
+            end else if (((node0_q_port0_first_words[0] == 32'hA31E57BD) &&
+                          (node0_q_port0_first_words[1] == 32'hA31E57BD)) ||
+                         ((node0_q_port1_first_words[0] == 32'hA31E57BD) &&
+                          (node0_q_port1_first_words[1] == 32'hA31E57BD))) begin
+                $display("  DIAG TX detail: ENQSEQ is clean, but QSEQ repeats SYNC; suspect tx_frame_fifo/sync_fifo readout or port_tx_queue_sender read protocol.");
+            end else if (((node0_txwr_port0_first_words[0] == 32'hA31E57BD) &&
+                          (node0_txwr_port0_first_words[1] == 32'hA31E57BD)) ||
+                         ((node0_txwr_port1_first_words[0] == 32'hA31E57BD) &&
+                          (node0_txwr_port1_first_words[1] == 32'hA31E57BD))) begin
+                $display("  DIAG TX detail: QSEQ is clean, but TXWRSEQ repeats SYNC; suspect port_tx_queue_sender writes TX FIFO twice.");
+            end else if (((node0_txfifo_port0_first_words[0] == 32'hA31E57BD) &&
+                          (node0_txfifo_port0_first_words[1] == 32'hA31E57BD)) ||
+                         ((node0_txfifo_port1_first_words[0] == 32'hA31E57BD) &&
+                          (node0_txfifo_port1_first_words[1] == 32'hA31E57BD))) begin
+                $display("  DIAG TX detail: TXWRSEQ is clean, but TXFIFOSEQ repeats SYNC; suspect TX async FIFO or port_cdc TX FIFO read timing.");
+            end else if (((node0_out_port0_first_words[0] == 32'hA31E57BD) &&
+                          (node0_out_port0_first_words[1] == 32'hA31E57BD)) ||
+                         ((node0_out_port1_first_words[0] == 32'hA31E57BD) &&
+                          (node0_out_port1_first_words[1] == 32'hA31E57BD))) begin
+                $display("  DIAG TX detail: TXFIFOSEQ is clean, but OUTSEQ repeats SYNC; suspect port_cdc output valid/data alignment.");
+            end else if (((node1_link_first_words[0] == 32'hA31E57BD) &&
+                          (node1_link_first_words[1] == 32'hA31E57BD)) ||
+                         ((node7_link_first_words[0] == 32'hA31E57BD) &&
+                          (node7_link_first_words[1] == 32'hA31E57BD))) begin
+                $display("  DIAG TX detail: OUTSEQ is clean, but LINKSEQ repeats SYNC; suspect testbench link pipeline sampling or valid/data alignment.");
+            end
+
             if (((node1_link_first_words[0] == 32'hA31E57BD) &&
                  (node1_link_first_words[1] == 32'hA31E57BD)) ||
                 ((node7_link_first_words[0] == 32'hA31E57BD) &&
@@ -600,7 +829,12 @@ module tb_8node_ring;
                 $display("  DIAG detail: LINKSEQ/RXSEQ do not show first-word duplication; suspect frame_rx FIFO read consumption timing.");
             end
 
-            if (!seen_node1_in1_sync && !seen_node7_in0_sync)
+            if (((node0_txwr_port0_first_words[0] == 32'hA31E57BD) &&
+                 (node0_txwr_port0_first_words[1] == 32'hA31E57BD)) ||
+                ((node0_txwr_port1_first_words[0] == 32'hA31E57BD) &&
+                 (node0_txwr_port1_first_words[1] == 32'hA31E57BD)))
+                $display("  DIAG conclusion: port_tx_queue_sender TX FIFO write timing repeats the first queue word.");
+            else if (!seen_node1_in1_sync && !seen_node7_in0_sync)
                 $display("  DIAG conclusion: testbench ring link or valid/data pipeline problem.");
             else if (!seen_node1_frame_ready && !seen_node7_frame_ready)
                 $display("  DIAG conclusion: RX FIFO/frame_rx/CRC parse problem; inspect frame_rx.st, crc_res, crc_rcv.");
@@ -799,11 +1033,31 @@ module tb_8node_ring;
         node7_link_sync_count = 0;
         node1_rx_sync_count = 0;
         node7_rx_sync_count = 0;
+        node0_enq_port0_seq_idx = 0;
+        node0_enq_port1_seq_idx = 0;
+        node0_q_port0_seq_idx = 0;
+        node0_q_port1_seq_idx = 0;
+        node0_txwr_port0_seq_idx = 0;
+        node0_txwr_port1_seq_idx = 0;
+        node0_txfifo_port0_seq_idx = 0;
+        node0_txfifo_port1_seq_idx = 0;
+        node0_out_port0_seq_idx = 0;
+        node0_out_port1_seq_idx = 0;
         for (n = 0; n < 8; n = n + 1) begin
             node1_link_first_words[n] = 32'd0;
             node7_link_first_words[n] = 32'd0;
             node1_rx_first_words[n] = 32'd0;
             node7_rx_first_words[n] = 32'd0;
+            node0_enq_port0_first_words[n] = 32'd0;
+            node0_enq_port1_first_words[n] = 32'd0;
+            node0_q_port0_first_words[n] = 32'd0;
+            node0_q_port1_first_words[n] = 32'd0;
+            node0_txwr_port0_first_words[n] = 32'd0;
+            node0_txwr_port1_first_words[n] = 32'd0;
+            node0_txfifo_port0_first_words[n] = 32'd0;
+            node0_txfifo_port1_first_words[n] = 32'd0;
+            node0_out_port0_first_words[n] = 32'd0;
+            node0_out_port1_first_words[n] = 32'd0;
         end
 
         send_app_frame(0, 8'd4, 4, 32'hA000_0000);

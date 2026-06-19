@@ -15,3 +15,6 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# Simulation build artifacts
+sim_build/

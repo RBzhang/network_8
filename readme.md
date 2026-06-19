@@ -433,6 +433,26 @@ vvp sim_build\tb_8node_ring.vvp
 
 因此当前自动诊断结论是：同一首跳端口在链路输入侧已经看到连续两个 `SYNC_WORD`，RX FIFO 读出只是复现了该序列；这不像是 `sim/ip_stubs.v` 的 FIFO IP stub 单独造成的问题。优先怀疑 `port_cdc` TX 输出时序或 testbench link pipeline 在 `valid/data` 对齐上重复了首字。`frame_rx` 中 `sid/did/plen/wi` 错位和 CRC 不一致是后续结果：第二个 `SYNC_WORD` 被当作 header1 消费，导致最后一个 payload 被误当作 CRC。下一步应继续在 Node0 `valid_out0/valid_out1` 和 `port_cdc` TX 侧增加 TXSEQ，对比 TX async FIFO 读出、TX sender 输出与 testbench link 输入，暂不需要先大改 `frame_rx` 或协议格式。
 
+## TXSEQ 分层调试结论
+
+本轮继续在 `tb_8node_ring.v` 中增加 Node0 TX 侧分层序列监控：`ENQSEQ`、`QSEQ`、`TXWRSEQ`、`TXFIFOSEQ`、`OUTSEQ`，并保留已有 `LINKSEQ/RXSEQ/RXDBG/FWDDBG`。两种仿真模式仍然都能完成编译，但 Test 1 都会超时：
+
+- stub 模式：`iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`
+- 行为 FIFO 模式：`iverilog -g2012 -DIVERILOG_BEHAV_FIFO -o sim_build/tb_8node_ring_behav.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`
+
+两种模式的关键前 8 个 word 一致：
+
+- Node0 `ENQSEQ` port0/port1: `a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003 527e65fd`
+- Node0 `QSEQ` port0/port1: `a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003 527e65fd`
+- Node0 `TXWRSEQ` port0/port1: `a31e57bd a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003`
+- Node0 `TXFIFOSEQ` port0/port1: `a31e57bd a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003`
+- Node0 `OUTSEQ` port0/port1: `a31e57bd a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003`
+- Node1/Node7 `LINKSEQ`: `a31e57bd a31e57bd 00040000 00040000 a0000000 a0000001 a0000002 a0000003`
+
+因此重复 `SYNC_WORD` 第一次出现在 `TXWRSEQ`，而不是 `tx_enqueue_engine` 写入侧、`tx_frame_fifo` 读出侧、TX async FIFO、`port_cdc` 输出寄存器或 testbench link pipeline。当前定位结论是：`port_tx_queue_sender` 写 TX FIFO 的时序重复了第一个队列 word。更具体地说，`QSEQ` 已经按正确顺序从 `tx_frame_fifo` 看到 `SYNC/header1/header2/...`，但 `TXWRSEQ` 写入 TX FIFO 时变成 `SYNC/SYNC/header1/...`，后续 RX CRC 错位只是这个 TX 侧重复首字的结果。
+
+建议的最小 RTL 修复方向是只改 `port_tx_queue_sender.v` 的读写协议：不要在拉起 `frame_rd_en` 的同一个周期直接把当前 `frame_dout` 写入 TX FIFO；应把 FIFO 读出 word 先锁存成一拍有效数据，再用该锁存数据产生 `tx_wr_en/tx_din`。这样可以避免同步 FIFO 的注册读使能让 sender 消费到上一拍队头 word。协议格式、`frame_rx`、CRC 和 per-port FIFO 结构暂时不需要改。
+
 ## 发布脚本
 
 仓库新增了一个 PowerShell 发布脚本：[`scripts/publish_to_main.ps1`](scripts/publish_to_main.ps1)。
