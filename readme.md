@@ -536,3 +536,16 @@ This round re-checked the 8-node ring testbench after the Test 1 timeout report.
 - `vvp sim_build/tb_8node_ring_stub.vvp` passed and ended with `ALL TESTS PASSED`.
 - `git ls-remote origin refs/heads/main` matches the local `HEAD`, so the push target is current.
 - Vivado/XSim could not be run from this shell because `vivado` and `xsim` are not on `PATH`.
+## Vivado/XSim FIFO read timing issue
+
+Icarus stub simulation previously passed, but the user-provided Vivado/XSim Test1 log showed a clean ENQ sequence and a bad Q/TXWR sequence. In that log, `node0_enq_port*_first_words` started with `a31e57bd`, while `node0_q_port*_first_words` and later TX/link sequences started with `00040000`. That localizes the first bad layer to `port_tx_queue_sender` reading `tx_frame_fifo`, not to the ring link pipeline, source app handshake, or `tx_enqueue_engine` write side.
+
+The old sender sampled `frame_dout` and asserted `frame_rd_en` in the same send path timing window. That is fragile with Vivado/XSim FIFO read timing because the FIFO can advance before the intended first word is safely locked. The sender now locks `frame_dout` in `S_LOAD`, writes the locked `word_buf` to the TX FIFO in `S_WRITE`, asserts `frame_rd_en` only after the word is successfully written, then waits one cycle in `S_POP_WAIT` before loading the next word.
+
+Validation in this shell:
+
+- `iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v` passed.
+- `vvp sim_build/tb_8node_ring_stub.vvp > sim_build/tb_8node_ring_stub.log` passed.
+- The stub log ends with `ALL TESTS PASSED`.
+
+Vivado/XSim was not run here because the shell does not provide Vivado tools. Re-run Vivado/XSim locally and check that Test1 first-word diagnostics now start with `a31e57bd` at `node0_q`, `node0_txwr`, `node0_out`, and first-hop `node1_link` / `node7_link`.

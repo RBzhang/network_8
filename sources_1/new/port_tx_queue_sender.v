@@ -24,13 +24,14 @@ module port_tx_queue_sender #(
     output reg  [31:0] tx_din,
     output reg         timeout_drop
 );
-    localparam [1:0] S_IDLE  = 2'd0;
-    localparam [1:0] S_LOAD  = 2'd1;
-    localparam [1:0] S_WRITE = 2'd2;
-    localparam [1:0] S_DROP  = 2'd3;
+    localparam [2:0] S_IDLE     = 3'd0;
+    localparam [2:0] S_LOAD     = 3'd1;
+    localparam [2:0] S_WRITE    = 3'd2;
+    localparam [2:0] S_DROP     = 3'd3;
+    localparam [2:0] S_POP_WAIT = 3'd4;
     localparam [TIME_W-1:0] TIMEOUT_CYCLES = TX_QUEUE_TIMEOUT_CYCLES;
 
-    reg [1:0] st;
+    reg [2:0] st;
     reg [15:0] words_left;
     reg [31:0] word_buf;
     reg        word_valid;
@@ -80,11 +81,6 @@ module port_tx_queue_sender #(
                         tx_din <= frame_dout[31:0];
                         word_valid <= 1'b1;
                         word_last <= (words_left <= 16'd1);
-                        frame_rd_en <= 1'b1;
-                        if (words_left <= 16'd1)
-                            words_left <= 16'd0;
-                        else
-                            words_left <= words_left - 1'b1;
                         st <= S_WRITE;
                     end
                 end
@@ -94,13 +90,16 @@ module port_tx_queue_sender #(
                         tx_din <= word_buf;
                         if (!tx_full) begin
                             tx_wr_en <= 1'b1;
+                            frame_rd_en <= 1'b1;
                             word_valid <= 1'b0;
-                            if (word_last) begin
+                            if (words_left <= 16'd1) begin
+                                words_left <= 16'd0;
                                 meta_rd_en <= 1'b1;
                                 word_last <= 1'b0;
                                 st <= S_IDLE;
                             end else begin
-                                st <= S_LOAD;
+                                words_left <= words_left - 1'b1;
+                                st <= S_POP_WAIT;
                             end
                         end
                     end
@@ -118,6 +117,10 @@ module port_tx_queue_sender #(
                             words_left <= words_left - 1'b1;
                         end
                     end
+                end
+
+                S_POP_WAIT: begin
+                    st <= S_LOAD;
                 end
 
                 default: st <= S_IDLE;
