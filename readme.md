@@ -503,3 +503,11 @@ Test2 关键发现：源端 Node5 输出的帧序列正确，为 `a31e57bd 05010
 - 行为 FIFO 模式：`iverilog -g2012 -DIVERILOG_BEHAV_FIFO -o sim_build/tb_8node_ring_behav.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`，随后 `vvp sim_build/tb_8node_ring_behav.vvp > sim_build/tb_8node_ring_behav.log`，5 项测试全部通过。
 
 完整测试结果：Test1 `Node0 -> Node4` 通过；Test2 `Node5 -> Node1` 通过；Test3 `Node2 broadcast` 通过；Test4 `Node0` 连续 5 个小包到 `Node3` 通过；Test5 `Node6 -> Node7` 最大 payload=256 通过。当前没有新的首个失败点，也不需要继续修改 RTL。
+
+## 继续中断后的当前测试结论
+
+本轮继续核查了当前 GitHub 仓库版本，保留的修复仍然有效：`port_tx_queue_sender.v` 仍是 `S_IDLE -> S_LOAD -> S_WRITE`；`tx_enqueue_engine.v` 仍有 `forward_ack_wait`，且 `payload_is_forward` 仍是 `active_forward && (st == S_PAYLOAD)`；`rx_report_fifo.v` 仍保留 `R_HDR1_WAIT` 和 `R_PAYLOAD_WAIT`。`tb_8node_ring.v` 的真实 ring link pipeline 仍然是无条件运行，`link_data_cw/link_valid_cw/link_data_ccw/link_valid_ccw` 没有被 `test1_debug_active` 或 `test2_debug_active` 包裹。
+
+stub 模式本轮已完整跑到 `ALL TESTS PASSED`，没有卡在 Test2，也没有落入 Test3/Test4/Test5 的新失败点；日志里 Test2 的自动诊断摘要仍显示 `PAYLOAD2DBG`、`RXCONSUME2DBG`、`RXREPORT2DBG`、`APP2DBG` 的时序正常，且没有 A-E 故障签名。行为 FIFO 模式也同样完整跑到 `ALL TESTS PASSED`。
+
+本轮没有再改 RTL，只做了现有结论核查和日志确认；当前无需继续修 RTL。若后续再遇到超时，优先看 `wait_network_idle` 的空闲判定和 Test2 调试输出是否再次被放大，而不是先动数据通路。
