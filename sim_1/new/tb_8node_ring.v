@@ -200,6 +200,7 @@ module tb_8node_ring;
     reg [15:0] last_rx_count [0:NUM_NODES-1];
 
     // Test 1 layered debug flags
+    reg test1_debug_active;
     reg seen_node1_in1_sync;
     reg seen_node7_in0_sync;
     reg seen_node1_frame_ready;
@@ -243,6 +244,21 @@ module tb_8node_ring;
     reg [31:0] node0_out_port0_first_words [0:7];
     reg [31:0] node0_out_port1_first_words [0:7];
 
+    // Test 2 focused debug and automatic diagnosis state.
+    reg test2_debug_active;
+    integer test2_debug_cycles;
+    integer test2_forward_req_5_0_count [0:NUM_NODES-1];
+    integer test2_forward_req_5_0_dup0_count [0:NUM_NODES-1];
+    reg test2_dedup_issue;
+    reg test2_consumed_before_payload_done;
+    reg test2_payload_read_zero;
+    reg test2_queue_write_zero;
+    reg test2_queue_payload_ok;
+    reg test2_len_mismatch_after_good_forward;
+    reg [15:0] test2_max_payload_idx [0:NUM_NODES-1];
+    reg [31:0] test2_payload_seen [0:NUM_NODES-1][0:2];
+    reg [31:0] test2_queue_seen [0:NUM_NODES-1][0:2];
+
     genvar gn;
     generate
         for (gn = 0; gn < NUM_NODES; gn = gn + 1) begin : g_rx_mon
@@ -275,7 +291,7 @@ module tb_8node_ring;
     // Monitor: print when any valid_out goes high
     always @(posedge clk) begin
         for (integer mi = 0; mi < NUM_NODES; mi = mi + 1) begin
-            if (valid_out0[mi] || valid_out1[mi])
+            if (test1_debug_active && (valid_out0[mi] || valid_out1[mi]))
                 $display("  MONITOR time=%0t: node%0d vout0=%0d vout1=%0d",
                          $time, mi, valid_out0[mi], valid_out1[mi]);
         end
@@ -306,7 +322,7 @@ module tb_8node_ring;
                 node0_out_port0_first_words[tx_rst_i] <= 32'd0;
                 node0_out_port1_first_words[tx_rst_i] <= 32'd0;
             end
-        end else begin
+        end else if (test1_debug_active) begin
             if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en[0]) begin
                 $display("ENQSEQ node=0 port=0 idx=%0d sof=%0d eof=%0d data=%08h",
                          node0_enq_port0_seq_idx,
@@ -422,7 +438,7 @@ module tb_8node_ring;
                 node1_link_first_words[link_rst_i] <= 32'd0;
                 node7_link_first_words[link_rst_i] <= 32'd0;
             end
-        end else begin
+        end else if (test1_debug_active) begin
             if (valid_in1[1]) begin
                 $display("LINKSEQ node=1 port=1 idx=%0d data=%08h", node1_link_seq_idx, in1[1]);
                 $display("LINKDBG time=%0t node=1 port=1 data=%08h", $time, in1[1]);
@@ -463,7 +479,7 @@ module tb_8node_ring;
                 node1_rx_first_words[rx_rst_i] <= 32'd0;
                 node7_rx_first_words[rx_rst_i] <= 32'd0;
             end
-        end else begin
+        end else if (test1_debug_active) begin
             if (g_node[1].u_node.u_node_core.rx_rd_en[1]) begin
                 $display("RXSEQ node=1 port=1 idx=%0d dout=%08h st=%0d",
                          node1_rx_seq_idx,
@@ -545,7 +561,7 @@ module tb_8node_ring;
             seen_node7_forward_req <= 1'b0;
             seen_node1_valid_out <= 1'b0;
             seen_node7_valid_out <= 1'b0;
-        end else begin
+        end else if (test1_debug_active) begin
             if (g_node[1].u_node.u_node_core.forward_candidate_valid ||
                 g_node[1].u_node.u_node_core.forward_candidate_done ||
                 g_node[1].u_node.u_node_core.forward_req ||
@@ -598,6 +614,191 @@ module tb_8node_ring;
         end
     end
 
+    genvar dbg_n;
+    generate
+        for (dbg_n = 0; dbg_n < NUM_NODES; dbg_n = dbg_n + 1) begin : g_test2_debug
+            always @(posedge clk) begin
+                if (rst) begin
+                    test2_forward_req_5_0_count[dbg_n] <= 0;
+                    test2_forward_req_5_0_dup0_count[dbg_n] <= 0;
+                    test2_max_payload_idx[dbg_n] <= 16'd0;
+                    test2_payload_seen[dbg_n][0] <= 32'd0;
+                    test2_payload_seen[dbg_n][1] <= 32'd0;
+                    test2_payload_seen[dbg_n][2] <= 32'd0;
+                    test2_queue_seen[dbg_n][0] <= 32'd0;
+                    test2_queue_seen[dbg_n][1] <= 32'd0;
+                    test2_queue_seen[dbg_n][2] <= 32'd0;
+                end else if (test2_debug_active) begin
+                    if (test2_debug_cycles < 1200) begin
+                        if (g_node[dbg_n].u_node.u_node_core.forward_candidate_valid ||
+                            g_node[dbg_n].u_node.u_node_core.forward_req ||
+                            g_node[dbg_n].u_node.u_node_core.forward_accept ||
+                            g_node[dbg_n].u_node.u_node_core.forward_dropped ||
+                            g_node[dbg_n].u_node.u_node_core.forward_candidate_done ||
+                            g_node[dbg_n].u_node.u_node_core.forward_candidate_duplicate) begin
+                            $display("FWD2DBG time=%0t node=%0d cand_port=%0d src=%02h dst=%02h count=%04h len=%04h should=%0d mask=%b payload_port=%0d req=%0d accept=%0d drop=%0d done=%0d duplicate=%0d",
+                                     $time, dbg_n,
+                                     g_node[dbg_n].u_node.u_node_core.forward_candidate_port,
+                                     g_node[dbg_n].u_node.u_node_core.forward_candidate_src,
+                                     g_node[dbg_n].u_node.u_node_core.forward_candidate_dst,
+                                     g_node[dbg_n].u_node.u_node_core.forward_candidate_count,
+                                     g_node[dbg_n].u_node.u_node_core.forward_candidate_len,
+                                     g_node[dbg_n].u_node.u_node_core.forward_candidate_should_forward,
+                                     g_node[dbg_n].u_node.u_node_core.forward_port_mask,
+                                     g_node[dbg_n].u_node.u_node_core.forward_payload_port,
+                                     g_node[dbg_n].u_node.u_node_core.forward_req,
+                                     g_node[dbg_n].u_node.u_node_core.forward_accept,
+                                     g_node[dbg_n].u_node.u_node_core.forward_dropped,
+                                     g_node[dbg_n].u_node.u_node_core.forward_candidate_done,
+                                     g_node[dbg_n].u_node.u_node_core.forward_candidate_duplicate);
+                        end
+
+                        if (g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_lookup ||
+                            g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_insert) begin
+                            $display("DEDUP2DBG time=%0t node=%0d lookup=%0d lookup_src=%02h lookup_count=%04h found=%0d insert=%0d insert_src=%02h insert_count=%04h",
+                                     $time, dbg_n,
+                                     g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_lookup,
+                                     g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_src,
+                                     g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_count,
+                                     g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_found,
+                                     g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_insert,
+                                     g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_src,
+                                     g_node[dbg_n].u_node.u_node_core.u_forward_engine.forward_dedup_count);
+                        end
+                    end
+
+                    if (g_node[dbg_n].u_node.u_node_core.forward_accept &&
+                        !g_node[dbg_n].u_node.u_node_core.forward_dropped &&
+                        g_node[dbg_n].u_node.u_node_core.forward_src_id == 8'd5 &&
+                        g_node[dbg_n].u_node.u_node_core.forward_count == 16'd0) begin
+                        test2_forward_req_5_0_count[dbg_n] <= test2_forward_req_5_0_count[dbg_n] + 1;
+                        if (!g_node[dbg_n].u_node.u_node_core.forward_candidate_duplicate) begin
+                            test2_forward_req_5_0_dup0_count[dbg_n] <= test2_forward_req_5_0_dup0_count[dbg_n] + 1;
+                            if (test2_forward_req_5_0_dup0_count[dbg_n] >= 1)
+                                test2_dedup_issue <= 1'b1;
+                        end
+                    end
+
+                    if (g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_forward &&
+                        g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_src == 8'd5 &&
+                        g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_count == 16'd0) begin
+                        if (g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.payload_idx > test2_max_payload_idx[dbg_n])
+                            test2_max_payload_idx[dbg_n] <= g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.payload_idx;
+
+                        if (g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.st == 3'd4) begin
+                            if (test2_debug_cycles < 1200) begin
+                                $display("PAYLOAD2DBG time=%0t node=%0d st=%0d active_forward=%0d src=%02h dst=%02h count=%04h len=%04h payload_idx=%0d enqueue_idx=%0d payload_port=%0d rx_idx0=%0d rx_data0=%08h rx_idx1=%0d rx_data1=%08h enqueue_data=%08h q_wr=%b q_data0=%08h q_data1=%08h",
+                                         $time, dbg_n,
+                                         g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.st,
+                                         g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_forward,
+                                         g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_src,
+                                         g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_dst,
+                                         g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_count,
+                                         g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_len,
+                                         g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.payload_idx,
+                                         g_node[dbg_n].u_node.u_node_core.enqueue_payload_index,
+                                         g_node[dbg_n].u_node.u_node_core.enqueue_payload_forward_port,
+                                         g_node[dbg_n].u_node.u_node_core.rx_payload_index[0],
+                                         g_node[dbg_n].u_node.u_node_core.rx_payload_data[0],
+                                         g_node[dbg_n].u_node.u_node_core.rx_payload_index[1],
+                                         g_node[dbg_n].u_node.u_node_core.rx_payload_data[1],
+                                         g_node[dbg_n].u_node.u_node_core.enqueue_payload_data,
+                                         g_node[dbg_n].u_node.u_node_core.tx_frame_queue_wr_en,
+                                         g_node[dbg_n].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 32],
+                                         g_node[dbg_n].u_node.u_node_core.tx_frame_queue_din_flat[1*34 +: 32]);
+                            end
+
+                            if (g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.payload_idx < 3) begin
+                                test2_payload_seen[dbg_n][g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.payload_idx] <=
+                                    g_node[dbg_n].u_node.u_node_core.enqueue_payload_data;
+                                test2_queue_seen[dbg_n][g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.payload_idx] <=
+                                    g_node[dbg_n].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 32];
+                                if (g_node[dbg_n].u_node.u_node_core.enqueue_payload_data == 32'd0)
+                                    test2_payload_read_zero <= 1'b1;
+                                if ((g_node[dbg_n].u_node.u_node_core.enqueue_payload_data == (32'hB000_0000 + g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.payload_idx)) &&
+                                    (g_node[dbg_n].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 32] == 32'd0))
+                                    test2_queue_write_zero <= 1'b1;
+                                if (g_node[dbg_n].u_node.u_node_core.enqueue_payload_data == (32'hB000_0000 + g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.payload_idx))
+                                    test2_queue_payload_ok <= 1'b1;
+                            end
+                        end
+                    end
+
+                    if (test2_debug_cycles < 1200 &&
+                        (|g_node[dbg_n].u_node.u_node_core.frame_ready ||
+                         |g_node[dbg_n].u_node.u_node_core.frame_consumed)) begin
+                        $display("RXCONSUME2DBG time=%0t node=%0d ready=%b consumed=%b src0=%02h dst0=%02h count0=%04h len0=%04h st0=%0d idx0=%0d data0=%08h src1=%02h dst1=%02h count1=%04h len1=%04h st1=%0d idx1=%0d data1=%08h",
+                                 $time, dbg_n,
+                                 g_node[dbg_n].u_node.u_node_core.frame_ready,
+                                 g_node[dbg_n].u_node.u_node_core.frame_consumed,
+                                 g_node[dbg_n].u_node.u_node_core.rx_src_id[0],
+                                 g_node[dbg_n].u_node.u_node_core.rx_dst_id[0],
+                                 g_node[dbg_n].u_node.u_node_core.rx_count[0],
+                                 g_node[dbg_n].u_node.u_node_core.rx_len16[0],
+                                 g_node[dbg_n].u_node.u_node_core.g_rx[0].u_frame_rx.st,
+                                 g_node[dbg_n].u_node.u_node_core.rx_payload_index[0],
+                                 g_node[dbg_n].u_node.u_node_core.rx_payload_data[0],
+                                 g_node[dbg_n].u_node.u_node_core.rx_src_id[1],
+                                 g_node[dbg_n].u_node.u_node_core.rx_dst_id[1],
+                                 g_node[dbg_n].u_node.u_node_core.rx_count[1],
+                                 g_node[dbg_n].u_node.u_node_core.rx_len16[1],
+                                 g_node[dbg_n].u_node.u_node_core.g_rx[1].u_frame_rx.st,
+                                 g_node[dbg_n].u_node.u_node_core.rx_payload_index[1],
+                                 g_node[dbg_n].u_node.u_node_core.rx_payload_data[1]);
+                    end
+
+                    if (g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_forward &&
+                        g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_src == 8'd5 &&
+                        g_node[dbg_n].u_node.u_node_core.u_tx_enqueue_engine.active_count == 16'd0 &&
+                        |g_node[dbg_n].u_node.u_node_core.frame_consumed &&
+                        (test2_max_payload_idx[dbg_n] < 16'd2))
+                        test2_consumed_before_payload_done <= 1'b1;
+                end
+            end
+        end
+    endgenerate
+
+    always @(posedge clk) begin
+        if (rst || !test2_debug_active) begin
+            test2_debug_cycles <= 0;
+        end else begin
+            test2_debug_cycles <= test2_debug_cycles + 1;
+            if (test2_debug_cycles < 1200) begin
+                if (app_rx_frame_valid[1] || app_rx_payload_valid[1]) begin
+                    $display("APP2DBG time=%0t node=1 frame_valid=%0d src=%02h dst=%02h count=%04h len=%04h payload_valid=%0d addr=%0d data=%08h rfifo_st=%0d",
+                             $time, app_rx_frame_valid[1], app_rx_src_id[1], app_rx_dst_id[1], app_rx_count[1], app_rx_len16[1],
+                             app_rx_payload_valid[1], app_rx_payload_addr[1], app_rx_payload_data[1],
+                             g_node[1].u_node.u_node_core.u_rx_report_fifo.st);
+                end
+                if (g_node[1].u_node.u_node_core.rx_report_wr_en) begin
+                    $display("RXREPORT2DBG time=%0t node=1 st=%0d active_port=%0d payload_index=%0d enq_fwd=%0d enq_idx=%0d rx_idx0=%0d rx_data0=%08h rx_idx1=%0d rx_data1=%08h wr_din=%08h",
+                             $time,
+                             g_node[1].u_node.u_node_core.u_rx_dispatcher.st,
+                             g_node[1].u_node.u_node_core.u_rx_dispatcher.active_port,
+                             g_node[1].u_node.u_node_core.u_rx_dispatcher.payload_index,
+                             g_node[1].u_node.u_node_core.enqueue_payload_is_forward,
+                             g_node[1].u_node.u_node_core.enqueue_payload_index,
+                             g_node[1].u_node.u_node_core.rx_payload_index[0],
+                             g_node[1].u_node.u_node_core.rx_payload_data[0],
+                             g_node[1].u_node.u_node_core.rx_payload_index[1],
+                             g_node[1].u_node.u_node_core.rx_payload_data[1],
+                             g_node[1].u_node.u_node_core.rx_report_din);
+                end
+                if (app_frame_done[5] || |g_node[5].u_node.u_node_core.tx_wr_en || valid_out0[5] || valid_out1[5]) begin
+                    $display("SRC2DBG time=%0t node=5 app_done=%0d tx_wr=%b tx_din0=%08h tx_din1=%08h vout0=%0d out0=%08h vout1=%0d out1=%08h",
+                             $time, app_frame_done[5], g_node[5].u_node.u_node_core.tx_wr_en,
+                             g_node[5].u_node.u_node_core.tx_din_flat[0*32 +: 32],
+                             g_node[5].u_node.u_node_core.tx_din_flat[1*32 +: 32],
+                             valid_out0[5], out0[5], valid_out1[5], out1[5]);
+                end
+                if (link_valid_ccw[5] || link_valid_cw[5] || valid_in0[4] || valid_in1[6]) begin
+                    $display("RXIN2DBG time=%0t link_ccw5_v=%0d link_ccw5=%08h link_cw5_v=%0d link_cw5=%08h in4p0_v=%0d in4p0=%08h in6p1_v=%0d in6p1=%08h",
+                             $time, link_valid_ccw[5], link_data_ccw[5], link_valid_cw[5], link_data_cw[5],
+                             valid_in0[4], in0[4], valid_in1[6], in1[6]);
+                end
+            end
+        end
+    end
     //--------------------------------------------------------------------------
     // Node ID assignment task
     //--------------------------------------------------------------------------
@@ -857,16 +1058,72 @@ module tb_8node_ring;
         input integer timeout_cycles;
         integer cycles;
         integer n;
+        integer idle_cycles;
+        reg idle_now;
         begin
             cycles = 0;
+            idle_cycles = 0;
             repeat (100) @(posedge clk); // let frames propagate initially
-            while (cycles < timeout_cycles) begin
+            while ((cycles < timeout_cycles) && (idle_cycles < 200)) begin
                 @(posedge clk);
                 cycles = cycles + 1;
+                idle_now = 1'b1;
+                for (n = 0; n < NUM_NODES; n = n + 1) begin
+                    if (network_congested[n] || valid_out0[n] || valid_out1[n] ||
+                        valid_in0[n] || valid_in1[n] ||
+                        link_valid_cw[n] || link_valid_ccw[n])
+                        idle_now = 1'b0;
+                end
+                if (idle_now)
+                    idle_cycles = idle_cycles + 1;
+                else
+                    idle_cycles = 0;
             end
+            if (cycles >= timeout_cycles)
+                $display("WARNING: wait_network_idle reached timeout_cycles=%0d", timeout_cycles);
         end
     endtask
 
+    task print_test2_diagnostic;
+        integer dn;
+        begin
+            $display("============================================================");
+            $display(" TEST2 DIAGNOSTIC SUMMARY");
+            $display("============================================================");
+            for (dn = 0; dn < NUM_NODES; dn = dn + 1) begin
+                if (test2_forward_req_5_0_count[dn] != 0 ||
+                    test2_payload_seen[dn][0] != 32'd0 ||
+                    test2_payload_seen[dn][1] != 32'd0 ||
+                    test2_payload_seen[dn][2] != 32'd0) begin
+                    $display("  Node%0d: forward_req(src=5,count=0)=%0d duplicate0_req=%0d max_payload_idx=%0d payload_seen=%08h/%08h/%08h queue_seen=%08h/%08h/%08h",
+                             dn,
+                             test2_forward_req_5_0_count[dn],
+                             test2_forward_req_5_0_dup0_count[dn],
+                             test2_max_payload_idx[dn],
+                             test2_payload_seen[dn][0],
+                             test2_payload_seen[dn][1],
+                             test2_payload_seen[dn][2],
+                             test2_queue_seen[dn][0],
+                             test2_queue_seen[dn][1],
+                             test2_queue_seen[dn][2]);
+                end
+            end
+            if (test2_dedup_issue)
+                $display("  DIAG A: forward dedup insert/lookup problem: same node issued multiple forward_req for src=5,count=0 with duplicate=0.");
+            if (test2_consumed_before_payload_done)
+                $display("  DIAG B: rx_dispatcher released frame_rx before tx_enqueue_engine finished reading forward payload.");
+            if (test2_payload_read_zero)
+                $display("  DIAG C: forward payload read timing problem: active_forward payload_idx 0/1/2 saw enqueue_payload_data=0.");
+            if (test2_queue_write_zero)
+                $display("  DIAG D: tx_enqueue_engine queue write timing problem: enqueue_payload_data was correct but queue_din_flat wrote 0.");
+            if (test2_len_mismatch_after_good_forward)
+                $display("  DIAG E: forwarded payload reached queue correctly, but Node1 app_rx checker saw len mismatch; suspect rx_report_fifo/app_rx checker or multi-frame overwrite.");
+            if (!test2_dedup_issue && !test2_consumed_before_payload_done &&
+                !test2_payload_read_zero && !test2_queue_write_zero &&
+                !test2_len_mismatch_after_good_forward)
+                $display("  DIAG: no A-E signature latched after current fix.");
+        end
+    endtask
     //--------------------------------------------------------------------------
     // Check that a unicast frame was received correctly
     //--------------------------------------------------------------------------
@@ -894,6 +1151,11 @@ module tb_8node_ring;
             if (last_rx_len[dst_node] !== expected_len[15:0]) begin
                 $error("FAIL Node %0d: expected len=%0d, got len=%0d",
                        dst_node, expected_len, last_rx_len[dst_node]);
+                if (test2_debug_active && dst_node == 1 && expected_src == 8'd5) begin
+                    if (test2_queue_payload_ok && !test2_payload_read_zero && !test2_queue_write_zero)
+                        test2_len_mismatch_after_good_forward = 1'b1;
+                    print_test2_diagnostic();
+                end
                 $fatal;
             end
 
@@ -1007,6 +1269,26 @@ module tb_8node_ring;
             app_rx_payload_ready[n] = 1'b1; // always ready
             received_frame_count[n] = 0;
         end
+        test1_debug_active = 1'b0;
+        test2_debug_active = 1'b0;
+        test2_debug_cycles = 0;
+        test2_dedup_issue = 1'b0;
+        test2_consumed_before_payload_done = 1'b0;
+        test2_payload_read_zero = 1'b0;
+        test2_queue_write_zero = 1'b0;
+        test2_queue_payload_ok = 1'b0;
+        test2_len_mismatch_after_good_forward = 1'b0;
+        for (n = 0; n < NUM_NODES; n = n + 1) begin
+            test2_forward_req_5_0_count[n] = 0;
+            test2_forward_req_5_0_dup0_count[n] = 0;
+            test2_max_payload_idx[n] = 16'd0;
+            test2_payload_seen[n][0] = 32'd0;
+            test2_payload_seen[n][1] = 32'd0;
+            test2_payload_seen[n][2] = 32'd0;
+            test2_queue_seen[n][0] = 32'd0;
+            test2_queue_seen[n][1] = 32'd0;
+            test2_queue_seen[n][2] = 32'd0;
+        end
 
         // Reset sequence
         repeat (20) @(posedge clk);
@@ -1024,6 +1306,7 @@ module tb_8node_ring;
         $display("============================================================");
         $display(" TEST 1: Unicast cross-ring (Node0 -> Node4)");
         $display("============================================================");
+        test1_debug_active = 1'b1;
 
         // Record baseline counts
         for (n = 0; n < NUM_NODES; n = n + 1)
@@ -1096,13 +1379,15 @@ module tb_8node_ring;
                      n, received_frame_count[n], last_rx_src[n], last_rx_dst[n]);
 
         if (test1_timed_out) begin
-            $display("Node4 未收到任何 app_rx 帧");
+            $display("Node4 δ�յ��κ� app_rx ֡");
             print_test1_diagnostic();
             $fatal(1, "TEST 1 failed before checking last_rx fields");
         end
 
         check_unicast_received(4, 8'd0, 8'd4, 4, 32'hA000_0000, expected_counts_g[4]);
         check_no_unexpected_frames(0, 4);
+        test1_debug_active = 1'b0;
+        wait_network_idle(10000);
 
         $display("============================================================");
         $display(" TEST 2: Reverse unicast (Node5 -> Node1)");
@@ -1111,12 +1396,35 @@ module tb_8node_ring;
         for (n = 0; n < NUM_NODES; n = n + 1)
             expected_counts_g[n] = received_frame_count[n];
 
+        test2_debug_active = 1'b0;
+        test2_debug_cycles = 0;
+        test2_dedup_issue = 1'b0;
+        test2_consumed_before_payload_done = 1'b0;
+        test2_payload_read_zero = 1'b0;
+        test2_queue_write_zero = 1'b0;
+        test2_queue_payload_ok = 1'b0;
+        test2_len_mismatch_after_good_forward = 1'b0;
+        for (n = 0; n < NUM_NODES; n = n + 1) begin
+            test2_forward_req_5_0_count[n] = 0;
+            test2_forward_req_5_0_dup0_count[n] = 0;
+            test2_max_payload_idx[n] = 16'd0;
+            test2_payload_seen[n][0] = 32'd0;
+            test2_payload_seen[n][1] = 32'd0;
+            test2_payload_seen[n][2] = 32'd0;
+            test2_queue_seen[n][0] = 32'd0;
+            test2_queue_seen[n][1] = 32'd0;
+            test2_queue_seen[n][2] = 32'd0;
+        end
+        test2_debug_active = 1'b1;
         send_app_frame(5, 8'd1, 3, 32'hB000_0000);
-        wait_network_idle(TIMEOUT_CYCLES);
 
         expected_counts_g[1] = expected_counts_g[1] + 1;
+        wait_for_rx_frames(1, expected_counts_g[1], TIMEOUT_CYCLES);
+        wait_network_idle(1000);
         check_unicast_received(1, 8'd5, 8'd1, 3, 32'hB000_0000, expected_counts_g[1]);
         check_no_unexpected_frames(5, 1);
+        print_test2_diagnostic();
+        test2_debug_active = 1'b0;
 
         $display("============================================================");
         $display(" TEST 3: Broadcast data (Node2 -> all others)");
@@ -1191,10 +1499,11 @@ module tb_8node_ring;
         $finish;
     end
     always @(posedge clk) begin
-    if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en != 0 ||
+    if (test1_debug_active &&
+        (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en != 0 ||
         g_node[0].u_node.u_node_core.tx_frame_meta_wr_en != 0 ||
         g_node[0].u_node.u_node_core.tx_wr_en != 0 ||
-        valid_out0[0] || valid_out1[0]) begin
+        valid_out0[0] || valid_out1[0])) begin
 
         $display("TXDBG t=%0t q_wr=%b meta_wr=%b q_empty=%b meta_empty=%b q_rd=%b meta_rd=%b tx_wr=%b tx_full=%b tx_empty=%b vout=%b%b",
             $time,

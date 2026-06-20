@@ -488,3 +488,18 @@ vvp sim_build\tb_8node_ring.vvp
 ```
 
 脚本会在 `main` 分支上完成 `git add`、`git commit` 和 `git push origin main`，因此可以直接把当前改动发布到 GitHub 的 `main`。
+
+## 继续昨天中断后的调试结论
+
+本轮保留了此前已经确认的三个 RTL 修复：`port_tx_queue_sender.v` 的 `S_IDLE -> S_LOAD -> S_WRITE` 读写解耦修复仍然有效，Test1 `Node0 -> Node4` 不再是当前问题；`tx_enqueue_engine.v` 增加 `forward_ack_wait`，避免 `forward_accept` 后 `forward_req` 尚未撤销时重复采样同一 forward descriptor；`tx_enqueue_engine.payload_is_forward` 只在 `S_PAYLOAD && active_forward` 时为 1，避免空闲态抢占 `frame_rx.payload_index`；`rx_report_fifo.v` 增加 header wait 和 payload wait 状态，修复读侧 `fifo_dout` 错位导致的 Test2 `len=1281` 和 payload 重复问题。
+
+中断前曾误把真实 ring link pipeline always 块 gate 到 debug enable，导致 Test2 源端帧无法传到第一跳。本轮复查并确认 `link_data_cw/link_valid_cw/link_data_ccw/link_valid_ccw` 的寄存逻辑已经恢复为始终运行；只保留 Test1 旧调试打印受 `test1_debug_active` 控制。为了避免完整仿真被日志和固定等待拖慢，Test2 的 `FWD2DBG/PAYLOAD2DBG/RXCONSUME2DBG/DEDUP2DBG/SRC2DBG/RXIN2DBG/RXREPORT2DBG/APP2DBG` 仍保留，但逐拍打印限制在 Test2 前 1200 拍，诊断摘要仍会输出；`wait_network_idle` 改为检测链路、输入输出 valid 和 `network_congested` 连续 200 拍空闲后提前退出，若等满 timeout 会打印 warning。
+
+Test2 关键发现：源端 Node5 输出的帧序列正确，为 `a31e57bd 05010000 00030000 b0000000 b0000001 b0000002 3ba7f20a`；第一跳 Node4/Node6 能看到该帧；转发节点的 `PAYLOAD2DBG` 显示 payload_idx 0/1/2 时 `enqueue_payload_data` 分别为 `b0000000/b0000001/b0000002`；`DEDUP2DBG` 显示接受转发后有 insert；Node1 `APP2DBG` 最终上报 `len=0003` 且 payload 为 `b0000000/b0000001/b0000002`。因此当前不再命中 A-E 故障签名，之前的重复转发/零 payload/len=1281 已由上述最小 RTL 修复消除。
+
+两组 iverilog 仿真结果均通过：
+
+- stub 模式：`iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`，随后 `vvp sim_build/tb_8node_ring_stub.vvp > sim_build/tb_8node_ring_stub.log`，5 项测试全部通过。
+- 行为 FIFO 模式：`iverilog -g2012 -DIVERILOG_BEHAV_FIFO -o sim_build/tb_8node_ring_behav.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`，随后 `vvp sim_build/tb_8node_ring_behav.vvp > sim_build/tb_8node_ring_behav.log`，5 项测试全部通过。
+
+完整测试结果：Test1 `Node0 -> Node4` 通过；Test2 `Node5 -> Node1` 通过；Test3 `Node2 broadcast` 通过；Test4 `Node0` 连续 5 个小包到 `Node3` 通过；Test5 `Node6 -> Node7` 最大 payload=256 通过。当前没有新的首个失败点，也不需要继续修改 RTL。

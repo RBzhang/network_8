@@ -34,10 +34,12 @@ module rx_report_fifo #(
     output reg  [15:0] app_rx_payload_addr,
     output reg  [31:0] app_rx_payload_data
 );
-    localparam [1:0] R_HDR0    = 2'd0;
-    localparam [1:0] R_HDR1    = 2'd1;
-    localparam [1:0] R_FRAME   = 2'd2;
-    localparam [1:0] R_PAYLOAD = 2'd3;
+    localparam [2:0] R_HDR0      = 3'd0;
+    localparam [2:0] R_HDR1_WAIT = 3'd1;
+    localparam [2:0] R_HDR1      = 3'd2;
+    localparam [2:0] R_FRAME     = 3'd3;
+    localparam [2:0] R_PAYLOAD   = 3'd4;
+    localparam [2:0] R_PAYLOAD_WAIT = 3'd5;
 
     wire [31:0] fifo_dout;
     wire        fifo_empty;
@@ -77,7 +79,7 @@ generate
     end
 endgenerate
 
-    reg [1:0] st;
+    reg [2:0] st;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -101,8 +103,12 @@ endgenerate
                     if (!fifo_empty) begin
                         header0 <= fifo_dout;
                         fifo_rd_en <= 1'b1;
-                        st <= R_HDR1;
+                        st <= R_HDR1_WAIT;
                     end
+                end
+
+                R_HDR1_WAIT: begin
+                    st <= R_HDR1;
                 end
 
                 R_HDR1: begin
@@ -141,8 +147,13 @@ endgenerate
                             st <= R_HDR0;
                         end else begin
                             payload_index <= payload_index + 1'b1;
+                            st <= R_PAYLOAD_WAIT;
                         end
                     end
+                end
+
+                R_PAYLOAD_WAIT: begin
+                    st <= R_PAYLOAD;
                 end
 
                 default: st <= R_HDR0;

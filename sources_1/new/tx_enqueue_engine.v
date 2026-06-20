@@ -72,6 +72,7 @@ module tx_enqueue_engine #(
     reg [15:0] active_len;
     reg [15:0] payload_idx;
     reg [PORT_W-1:0] payload_port_r;
+    reg forward_ack_wait;
 
     reg crc_init;
     reg crc_en;
@@ -91,7 +92,7 @@ module tx_enqueue_engine #(
     wire [15:0] active_words = active_len + 16'd4;
 
     assign payload_index = payload_idx;
-    assign payload_is_forward = active_forward;
+    assign payload_is_forward = active_forward && (st == S_PAYLOAD);
     assign payload_forward_port = payload_port_r;
     assign network_congested = (st != S_IDLE) ||
                                (
@@ -173,6 +174,7 @@ module tx_enqueue_engine #(
             active_len <= 16'd0;
             payload_idx <= 16'd0;
             payload_port_r <= {PORT_W{1'b0}};
+            forward_ack_wait <= 1'b0;
             local_accept <= 1'b0;
             local_app_done <= 1'b0;
             forward_accept <= 1'b0;
@@ -200,7 +202,10 @@ module tx_enqueue_engine #(
                 S_IDLE: begin
                     active_mask <= {NUM_PORTS{1'b0}};
                     payload_idx <= 16'd0;
-                    if (forward_req) begin
+                    if (forward_ack_wait) begin
+                        if (!forward_req)
+                            forward_ack_wait <= 1'b0;
+                    end else if (forward_req) begin
                         if (|forward_room_mask) begin
                             active_mask <= forward_room_mask;
                             active_forward <= 1'b1;
@@ -283,6 +288,7 @@ module tx_enqueue_engine #(
                     meta_wr_en <= active_mask;
                     if (active_forward) begin
                         forward_accept <= 1'b1;
+                        forward_ack_wait <= 1'b1;
                     end else if (active_local_is_app) begin
                         local_app_done <= 1'b1;
                     end
