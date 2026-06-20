@@ -123,25 +123,6 @@ module tx_enqueue_engine #(
         end
     endfunction
 
-    task set_all_queue_words;
-        input        sof;
-        input        eof;
-        input [31:0] data_word;
-        begin
-            for (j = 0; j < NUM_PORTS; j = j + 1)
-                queue_din_flat[j*34 +: 34] = {sof, eof, data_word};
-        end
-    endtask
-
-    task set_all_meta_words;
-        input [15:0] frame_words;
-        input [TIME_W-1:0] enqueue_time;
-        begin
-            for (k = 0; k < NUM_PORTS; k = k + 1)
-                meta_din_flat[k*(TIME_W+16) +: (TIME_W+16)] = {enqueue_time, frame_words};
-        end
-    endtask
-
     always @(*) begin
         local_room_mask = {NUM_PORTS{1'b0}};
         forward_room_mask = {NUM_PORTS{1'b0}};
@@ -235,14 +216,16 @@ module tx_enqueue_engine #(
                 end
 
                 S_SYNC: begin
-                    set_all_queue_words(1'b1, 1'b0, SYNC_WORD);
+                    for (j = 0; j < NUM_PORTS; j = j + 1)
+                        queue_din_flat[j*34 +: 34] <= {1'b1, 1'b0, SYNC_WORD};
                     queue_wr_en <= active_mask;
                     crc_init <= 1'b1;
                     st <= S_HEADER1;
                 end
 
                 S_HEADER1: begin
-                    set_all_queue_words(1'b0, 1'b0, {active_src, active_dst, active_count});
+                    for (j = 0; j < NUM_PORTS; j = j + 1)
+                        queue_din_flat[j*34 +: 34] <= {1'b0, 1'b0, {active_src, active_dst, active_count}};
                     queue_wr_en <= active_mask;
                     crc_en <= 1'b1;
                     crc_data <= {active_src, active_dst, active_count};
@@ -250,7 +233,8 @@ module tx_enqueue_engine #(
                 end
 
                 S_HEADER2: begin
-                    set_all_queue_words(1'b0, 1'b0, {active_len, 16'd0});
+                    for (j = 0; j < NUM_PORTS; j = j + 1)
+                        queue_din_flat[j*34 +: 34] <= {1'b0, 1'b0, {active_len, 16'd0}};
                     queue_wr_en <= active_mask;
                     crc_en <= 1'b1;
                     crc_data <= {active_len, 16'd0};
@@ -262,7 +246,8 @@ module tx_enqueue_engine #(
                 end
 
                 S_PAYLOAD: begin
-                    set_all_queue_words(1'b0, 1'b0, payload_data);
+                    for (j = 0; j < NUM_PORTS; j = j + 1)
+                        queue_din_flat[j*34 +: 34] <= {1'b0, 1'b0, payload_data};
                     queue_wr_en <= active_mask;
                     crc_en <= 1'b1;
                     crc_data <= payload_data;
@@ -282,8 +267,10 @@ module tx_enqueue_engine #(
                 end
 
                 S_CRC_WORD: begin
-                    set_all_queue_words(1'b0, 1'b1, crc_out);
-                    set_all_meta_words(active_words, current_time);
+                    for (j = 0; j < NUM_PORTS; j = j + 1)
+                        queue_din_flat[j*34 +: 34] <= {1'b0, 1'b1, crc_out};
+                    for (k = 0; k < NUM_PORTS; k = k + 1)
+                        meta_din_flat[k*(TIME_W+16) +: (TIME_W+16)] <= {current_time, active_words};
                     queue_wr_en <= active_mask;
                     meta_wr_en <= active_mask;
                     if (active_forward) begin
