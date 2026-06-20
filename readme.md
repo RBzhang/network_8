@@ -281,6 +281,7 @@ FIFO 老化机制，深度 64。以 `(srcID, count)` 为去重键。当前系统
 - `node.v` 为兼容性封装，`node_top.v` 为 2 光口板级 wrapper，实际可参数化逻辑入口为 `node_core.v`
 - 生产环境中 `async_fifo.v` 优先实例化 Vivado FIFO IP（`fifo_generator_32_512.xci`），该 FIFO IP 已经被设定为 FWFT 模式；TX 整帧空间预检查位于每端口主时钟域 `tx_frame_fifo`，队首帧超时丢弃由 `frame_meta_fifo` 和 `port_tx_queue_sender` 完成
 - 接收上报路径使用 Vivado `fifo_generator_sync` 同步 FIFO IP（`sources_1/ip/fifo_generator_sync/fifo_generator_sync.xci`），32bit 宽、FWFT、有 `data_count` 接口；上层 `app_rx_*` 从该 FIFO 的读侧获取数据
+- `tx_frame_fifo` 和 `frame_meta_fifo` 内部使用自定义 `sync_fifo`（FWFT 输出缓存），非标位宽（34-bit / 48-bit）不适合直接使用 Vivado FIFO IP
 - 当前转发策略为 best-effort per-port enqueue。
 对于 NUM_PORTS > 2 的复杂拓扑，若部分目标端口跳过，后续不会由转发层自动补发。
 若需要可靠多路径传播，应增加 per-port pending mask 或 ACK/重传机制。
@@ -337,40 +338,50 @@ Node0 -- Node1 -- Node2 -- Node3 -- Node4 -- Node5 -- Node6 -- Node7 -- (回 Nod
 | 4 | 连续小包 ×5 | Node0 → Node3 | 1 word ×5 (D000_0000..) | Node3 收 5 个不同 count 包 |
 | 5 | 最大 payload | Node6 → Node7 | 256 words (E000_0000..) | Node7 收完整 256 word，无 len_error |
 
-### 测试结果 (iverilog 12.0, 2026-06-19)
+### 测试结果 (2026-06-20, Vivado/XSim + iverilog 12.0)
 
-**历史状态: 阻塞 — TX 通路无输出（已被后续 LINKSEQ/RXSEQ 诊断更新）**
+**Vivado/XSim 行为仿真：ALL TESTS PASSED**
 
-| 检查项 | 结果 |
-|--------|------|
-| iverilog 编译 | 通过 (0 errors) |
-| Yosys 综合检查 | 通过 |
-| 复位/ID 分配 | 通过 (`send_app_frame` 完成握手，`app_frame_done` 正常脉冲) |
-| `network_congested` | 0 (未拥塞) |
-| `valid_out0/valid_out1` (全节点) | 历史观测曾记录为始终为 0；后续诊断已确认 Node0 的 `valid_out0/valid_out1` 会拉高 |
-| `received_frame_count` (全节点) | 全 0 — 无节点收到任何帧 |
+```
+TEST 1: Unicast cross-ring (Node0 -> Node4) — OK
+TEST 2: Reverse unicast (Node5 -> Node1) — OK
+TEST 3: Broadcast data (Node2 -> all others) — OK
+TEST 4: Continuous small packets ×5 (Node0 -> Node3) — OK
+TEST 5: Max payload len=256 (Node6 -> Node7) — OK
+ALL TESTS PASSED
+```
 
-**历史根本原因分析 (已被后续诊断更新):**
+**iverilog stub 仿真：ALL TESTS PASSED**
 
-测试平台中 `send_app_frame` 任务正确完成了 `app_frame_valid/ready` 握手和 `app_frame_done` 等待，
-帧已由 `tx_enqueue_engine` 写入 per-port `tx_frame_fifo`/`frame_meta_fifo` 队列，
-早期曾判断 `port_tx_queue_sender` → TX async FIFO → `port_cdc` 输出寄存器链路上 `valid_out` 始终为 0。
-后续 `LINKSEQ/RXSEQ` 诊断已确认 Node0 有 TX 输出，当前重点改为排查 TX/link 首字重复。
+```
+iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v
+vvp sim_build/tb_8node_ring_stub.vvp
+```
 
-**排查方向:**
-- `port_tx_queue_sender` 是否进入 S_DROP（超时丢弃）或停在 S_IDLE
-- TX async FIFO 的 `wr_en` / `full` / `empty` 信号状态
-- `port_cdc` 中 `rst_tx_sync` 是否持续拉高阻塞输出
-- `id_locked` 两级同步到 `tx_clk` 域的时序
+5 项测试全部通过。rx_overflow 粘性标志在所有节点上均有记录（广播测试瞬时 FIFO 满载触发），不影响帧正确投递。
 
-### 修复的仿真基础设施问题
+### 修复的 RTL 问题汇总
 
-| 问题 | 修复 |
-|------|------|
-| `sim/ip_stubs.v` 中 `fifo_generator_32_512`/`fifo_generator_sync` 的 `empty` 在 reset 后错误设为 0 | 重写为完整行为模型（格雷码指针 + 两级同步器） |
-| iverilog 不支持 task 数组参数 | 改为模块级全局数组 `expected_counts_g` |
-| `assign_node_ids` 中 `@(negedge rst)` 死等 | 移除，改为相对延时 |
-| `app_payload_data` 重复声明、`generate` 变量名冲突 | 拆分 g_payload / g_node 独立 generate 块 |
+| # | 问题 | 修复 | 文件 |
+|---|------|------|------|
+| 1 | `port_tx_queue_sender` 在同一周期 `frame_rd_en + tx_wr_en`，与 FIFO 读时序冲突导致首字重复 | 改为 S_IDLE→S_LOAD→S_WRITE→S_POP_WAIT：S_LOAD 锁存 frame_dout，S_WRITE 写 TX FIFO 成功后拉 frame_rd_en | `port_tx_queue_sender.v` |
+| 2 | `port_cdc` TX FIFO 读侧 `.rd_en(!tx_empty)` 组合直连，跨时钟域下可能读到不稳定的 dout | 改为 tx_rd_en_r + tx_pop_pending 安全读法：先锁存 dout，再分两拍完成 rd_en 和 valid_out 清零 | `port_cdc.v` |
+| 3 | `forward_engine` 中 `forward_accept` 后 `forward_req` 未撤销时重复采样同一 forward descriptor | 增加 `forward_ack_wait` 状态，等待 `forward_req` 下降后再接受新请求 | `tx_enqueue_engine.v` |
+| 4 | `payload_is_forward` 在空闲态抢占 `frame_rx.payload_index` | 限制为 `active_forward && (st == S_PAYLOAD)` 时才有效 | `tx_enqueue_engine.v` |
+| 5 | `rx_report_fifo` 读侧 `fifo_dout` 错位导致 Test2 len=1281 | 增加 R_HDR1_WAIT / R_PAYLOAD_WAIT 状态解耦读时序 | `rx_report_fifo.v` |
+| 6 | **Test1 首字丢失（根因）**：`tx_enqueue_engine` 中 task 使用阻塞赋值 (`=`) 设置 `queue_din_flat`，在 always 块求值阶段即刻生效。sync_fifo 在同一 posedge 读取时可能看到**下一个 enqueue 状态覆盖后的值**（HEADER1=00040000），而非当前状态的值（SYNC=a31e57bd） | task 删除，改为 always 块内直接使用 NBA (`<=`) + for 循环。NBA 更新延迟到所有 always 块求值完成之后，sync_fifo 读取时始终看到稳定旧值 | `tx_enqueue_engine.v` |
+| 7 | `sync_fifo` 使用组合读 `assign dout = mem[rd_ptr]`，在 Vivado/XSim 中表现不稳定 | 改为显式 FWFT 输出缓存：`dout_r` + `out_valid`，写入空 FIFO 直接旁路，内存读取使用 NBA | `sync_fifo.v` |
+
+### Vivado/XSim Test1 调试过程
+
+**问题现象：** `node0_q_port*_first_words` 以 `00040000` 开头（第二字），而非 `a31e57bd`（首字）。ENQ 写入侧正确，错误最早出现在 `tx_frame_fifo` 读出后的 Q 层。后续 TXWR、OUT、LINK、RX 均为已错误序列的传播。
+
+**排查过程：**
+1. `port_tx_queue_sender` 诊断：S_LOAD 首次看到的 `frame_dout` 已是 `00040000`，排除 sender 自身问题
+2. `sync_fifo` FWFT 改造：组合读 → 输出缓存，Vivado 结果未变
+3. **最终定位**：`tx_enqueue_engine.v` 中 `set_all_queue_words` task 用 `=` 设置 `queue_din_flat`（BA），与 sync_fifo 的 `posedge` 读取形成跨模块求值顺序竞争。iverilog 求值顺序恰使 sync_fifo 先读到 SYNC_WORD；Vivado/XSim 顺序相反，enqueue engine 先覆盖为 HEADER1 值
+
+**验证：** 修复后 Vivado/XSim 全部 5 项测试通过，`node0_q_port*_first_words` 正确以 `a31e57bd` 开头。
 
 ### 运行仿真
 
@@ -488,64 +499,3 @@ vvp sim_build\tb_8node_ring.vvp
 ```
 
 脚本会在 `main` 分支上完成 `git add`、`git commit` 和 `git push origin main`，因此可以直接把当前改动发布到 GitHub 的 `main`。
-
-## 继续昨天中断后的调试结论
-
-本轮保留了此前已经确认的三个 RTL 修复：`port_tx_queue_sender.v` 的 `S_IDLE -> S_LOAD -> S_WRITE` 读写解耦修复仍然有效，Test1 `Node0 -> Node4` 不再是当前问题；`tx_enqueue_engine.v` 增加 `forward_ack_wait`，避免 `forward_accept` 后 `forward_req` 尚未撤销时重复采样同一 forward descriptor；`tx_enqueue_engine.payload_is_forward` 只在 `S_PAYLOAD && active_forward` 时为 1，避免空闲态抢占 `frame_rx.payload_index`；`rx_report_fifo.v` 增加 header wait 和 payload wait 状态，修复读侧 `fifo_dout` 错位导致的 Test2 `len=1281` 和 payload 重复问题。
-
-中断前曾误把真实 ring link pipeline always 块 gate 到 debug enable，导致 Test2 源端帧无法传到第一跳。本轮复查并确认 `link_data_cw/link_valid_cw/link_data_ccw/link_valid_ccw` 的寄存逻辑已经恢复为始终运行；只保留 Test1 旧调试打印受 `test1_debug_active` 控制。为了避免完整仿真被日志和固定等待拖慢，Test2 的 `FWD2DBG/PAYLOAD2DBG/RXCONSUME2DBG/DEDUP2DBG/SRC2DBG/RXIN2DBG/RXREPORT2DBG/APP2DBG` 仍保留，但逐拍打印限制在 Test2 前 1200 拍，诊断摘要仍会输出；`wait_network_idle` 改为检测链路、输入输出 valid 和 `network_congested` 连续 200 拍空闲后提前退出，若等满 timeout 会打印 warning。
-
-Test2 关键发现：源端 Node5 输出的帧序列正确，为 `a31e57bd 05010000 00030000 b0000000 b0000001 b0000002 3ba7f20a`；第一跳 Node4/Node6 能看到该帧；转发节点的 `PAYLOAD2DBG` 显示 payload_idx 0/1/2 时 `enqueue_payload_data` 分别为 `b0000000/b0000001/b0000002`；`DEDUP2DBG` 显示接受转发后有 insert；Node1 `APP2DBG` 最终上报 `len=0003` 且 payload 为 `b0000000/b0000001/b0000002`。因此当前不再命中 A-E 故障签名，之前的重复转发/零 payload/len=1281 已由上述最小 RTL 修复消除。
-
-两组 iverilog 仿真结果均通过：
-
-- stub 模式：`iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`，随后 `vvp sim_build/tb_8node_ring_stub.vvp > sim_build/tb_8node_ring_stub.log`，5 项测试全部通过。
-- 行为 FIFO 模式：`iverilog -g2012 -DIVERILOG_BEHAV_FIFO -o sim_build/tb_8node_ring_behav.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`，随后 `vvp sim_build/tb_8node_ring_behav.vvp > sim_build/tb_8node_ring_behav.log`，5 项测试全部通过。
-
-完整测试结果：Test1 `Node0 -> Node4` 通过；Test2 `Node5 -> Node1` 通过；Test3 `Node2 broadcast` 通过；Test4 `Node0` 连续 5 个小包到 `Node3` 通过；Test5 `Node6 -> Node7` 最大 payload=256 通过。当前没有新的首个失败点，也不需要继续修改 RTL。
-
-## 继续中断后的当前测试结论
-
-本轮继续核查了当前 GitHub 仓库版本，保留的修复仍然有效：`port_tx_queue_sender.v` 仍是 `S_IDLE -> S_LOAD -> S_WRITE`；`tx_enqueue_engine.v` 仍有 `forward_ack_wait`，且 `payload_is_forward` 仍是 `active_forward && (st == S_PAYLOAD)`；`rx_report_fifo.v` 仍保留 `R_HDR1_WAIT` 和 `R_PAYLOAD_WAIT`。`tb_8node_ring.v` 的真实 ring link pipeline 仍然是无条件运行，`link_data_cw/link_valid_cw/link_data_ccw/link_valid_ccw` 没有被 `test1_debug_active` 或 `test2_debug_active` 包裹。
-
-stub 模式本轮已完整跑到 `ALL TESTS PASSED`，没有卡在 Test2，也没有落入 Test3/Test4/Test5 的新失败点；日志里 Test2 的自动诊断摘要仍显示 `PAYLOAD2DBG`、`RXCONSUME2DBG`、`RXREPORT2DBG`、`APP2DBG` 的时序正常，且没有 A-E 故障签名。行为 FIFO 模式也同样完整跑到 `ALL TESTS PASSED`。
-
-本轮没有再改 RTL，只做了现有结论核查和日志确认；当前无需继续修 RTL。若后续再遇到超时，优先看 `wait_network_idle` 的空闲判定和 Test2 调试输出是否再次被放大，而不是先动数据通路。
-
-## Vivado/XSim 仿真注意事项
-
-当前 `tb_8node_ring.v` 已改为默认 summary-only 输出，适合 Vivado/XSim 运行。默认参数为：`ENABLE_VERBOSE_DEBUG=0`、`ENABLE_TEST1_DEBUG=0`、`ENABLE_TEST2_DEBUG=0`、`ENABLE_SUMMARY_ONLY=1`。默认日志只保留每项测试的开始、OK/FAIL、全局 timeout 和最终 `ALL TESTS PASSED`，不再逐拍输出 `TXDBG/RXDBG/FWDDBG/FWD2DBG/PAYLOAD2DBG/RXCONSUME2DBG/DEDUP2DBG/SRC2DBG/RXIN2DBG/RXREPORT2DBG/APP2DBG/ENQSEQ/QSEQ/TXWRSEQ/TXFIFOSEQ/OUTSEQ/LINKSEQ/RXSEQ/MONITOR`。
-
-真实 ring link pipeline 已确认保持无条件运行：`link_data_cw <= out0`、`link_valid_cw <= valid_out0`、`link_data_ccw <= out1`、`link_valid_ccw <= valid_out1` 不受任何 debug 开关或 `test1_debug_active/test2_debug_active` 控制。
-
-Vivado/XSim 中请将 `sim_1/new/tb_8node_ring.v` 的 File Type 设置为 SystemVerilog，或将 testbench 文件改名为 `.sv`。该 testbench 使用 `for (integer i = 0; ...)` 等 SystemVerilog 写法；Icarus 仿真仍使用 `-g2012`。
-
-Vivado/XSim 仿真时使用 Vivado 工程中的 FIFO IP，不要把 `sim/ip_stubs.v` 加入 Vivado 仿真源，避免与 FIFO IP 模块名冲突。Icarus 仿真仍使用 `sim/ip_stubs.v`：`iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`，随后运行 `vvp sim_build/tb_8node_ring_stub.vvp > sim_build/tb_8node_ring_stub.log`。
-
-如需重新打开逐拍调试，可在 `tb_8node_ring.v` 顶部将 `ENABLE_VERBOSE_DEBUG` 设为 1，并按需要打开 `ENABLE_TEST1_DEBUG` 或 `ENABLE_TEST2_DEBUG`。本轮 stub 模式已经通过全部 5 项测试，行为 FIFO 模式也已通过全部 5 项测试。
-
-## Current Result Report
-
-This round re-checked the 8-node ring testbench after the Test 1 timeout report.
-
-- `sim_1/new/tb_8node_ring.v` is the active testbench file in this checkout.
-- The real ring link always block still runs unconditionally; it is not gated by `ENABLE_VERBOSE_DEBUG`, `ENABLE_TEST1_DEBUG`, or `ENABLE_TEST2_DEBUG`.
-- Test 1 still calls `send_app_frame(0, 8'd4, 4, 32'hA000_0000)`.
-- The testbench now latches source-side `SRC0CHK` signals during Test 1 so a timeout can report the Node0 stall layer instead of only saying "ring link problem".
-- `iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v` passed.
-- `vvp sim_build/tb_8node_ring_stub.vvp` passed and ended with `ALL TESTS PASSED`.
-- `git ls-remote origin refs/heads/main` matches the local `HEAD`, so the push target is current.
-- Vivado/XSim could not be run from this shell because `vivado` and `xsim` are not on `PATH`.
-## Vivado/XSim FIFO read timing issue
-
-Icarus stub simulation previously passed, but the user-provided Vivado/XSim Test1 log showed a clean ENQ sequence and a bad Q/TXWR sequence. In that log, `node0_enq_port*_first_words` started with `a31e57bd`, while `node0_q_port*_first_words` and later TX/link sequences started with `00040000`. That localizes the first bad layer to `port_tx_queue_sender` reading `tx_frame_fifo`, not to the ring link pipeline, source app handshake, or `tx_enqueue_engine` write side.
-
-The old sender sampled `frame_dout` and asserted `frame_rd_en` in the same send path timing window. That is fragile with Vivado/XSim FIFO read timing because the FIFO can advance before the intended first word is safely locked. The sender now locks `frame_dout` in `S_LOAD`, writes the locked `word_buf` to the TX FIFO in `S_WRITE`, asserts `frame_rd_en` only after the word is successfully written, then waits one cycle in `S_POP_WAIT` before loading the next word.
-
-Validation in this shell:
-
-- `iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v` passed.
-- `vvp sim_build/tb_8node_ring_stub.vvp > sim_build/tb_8node_ring_stub.log` passed.
-- The stub log ends with `ALL TESTS PASSED`.
-
-Vivado/XSim was not run here because the shell does not provide Vivado tools. Re-run Vivado/XSim locally and check that Test1 first-word diagnostics now start with `a31e57bd` at `node0_q`, `node0_txwr`, `node0_out`, and first-hop `node1_link` / `node7_link`.
