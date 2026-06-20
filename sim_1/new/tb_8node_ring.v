@@ -253,6 +253,26 @@ module tb_8node_ring;
     reg [31:0] node0_txfifo_port1_first_words [0:7];
     reg [31:0] node0_out_port0_first_words [0:7];
     reg [31:0] node0_out_port1_first_words [0:7];
+    integer sender0_load_frame_dout_seq_idx;
+    integer sender0_load_word_buf_seq_idx;
+    integer sender0_write_word_buf_seq_idx;
+    integer sender0_write_tx_din_seq_idx;
+    integer sender0_pop_frame_dout_seq_idx;
+    integer sender1_load_frame_dout_seq_idx;
+    integer sender1_load_word_buf_seq_idx;
+    integer sender1_write_word_buf_seq_idx;
+    integer sender1_write_tx_din_seq_idx;
+    integer sender1_pop_frame_dout_seq_idx;
+    reg [31:0] sender0_load_frame_dout_first_words [0:7];
+    reg [31:0] sender0_load_word_buf_first_words [0:7];
+    reg [31:0] sender0_write_word_buf_first_words [0:7];
+    reg [31:0] sender0_write_tx_din_first_words [0:7];
+    reg [31:0] sender0_pop_frame_dout_first_words [0:7];
+    reg [31:0] sender1_load_frame_dout_first_words [0:7];
+    reg [31:0] sender1_load_word_buf_first_words [0:7];
+    reg [31:0] sender1_write_word_buf_first_words [0:7];
+    reg [31:0] sender1_write_tx_din_first_words [0:7];
+    reg [31:0] sender1_pop_frame_dout_first_words [0:7];
 
     // Test 1 SRC0CHK source-side latches (Node0): captured during Test1 to
     // diagnose which TX layer the source frame stalls in.  These are only
@@ -471,6 +491,95 @@ module tb_8node_ring;
         end
     end
 
+    // Node0 port_tx_queue_sender internal sequence debug for Test 1.
+    // Collection is gated only by test1_debug_active; verbose flags must not
+    // hide these diagnostic first-word arrays.
+    always @(posedge clk) begin
+        if (rst) begin
+            sender0_load_frame_dout_seq_idx <= 0;
+            sender0_load_word_buf_seq_idx <= 0;
+            sender0_write_word_buf_seq_idx <= 0;
+            sender0_write_tx_din_seq_idx <= 0;
+            sender0_pop_frame_dout_seq_idx <= 0;
+            sender1_load_frame_dout_seq_idx <= 0;
+            sender1_load_word_buf_seq_idx <= 0;
+            sender1_write_word_buf_seq_idx <= 0;
+            sender1_write_tx_din_seq_idx <= 0;
+            sender1_pop_frame_dout_seq_idx <= 0;
+            for (integer snd_rst_i = 0; snd_rst_i < 8; snd_rst_i = snd_rst_i + 1) begin
+                sender0_load_frame_dout_first_words[snd_rst_i] <= 32'd0;
+                sender0_load_word_buf_first_words[snd_rst_i] <= 32'd0;
+                sender0_write_word_buf_first_words[snd_rst_i] <= 32'd0;
+                sender0_write_tx_din_first_words[snd_rst_i] <= 32'd0;
+                sender0_pop_frame_dout_first_words[snd_rst_i] <= 32'd0;
+                sender1_load_frame_dout_first_words[snd_rst_i] <= 32'd0;
+                sender1_load_word_buf_first_words[snd_rst_i] <= 32'd0;
+                sender1_write_word_buf_first_words[snd_rst_i] <= 32'd0;
+                sender1_write_tx_din_first_words[snd_rst_i] <= 32'd0;
+                sender1_pop_frame_dout_first_words[snd_rst_i] <= 32'd0;
+            end
+        end else if (test1_debug_active) begin
+            if ((g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.st == 3'd1) &&
+                !g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.frame_empty) begin
+                if (sender0_load_frame_dout_seq_idx < 8)
+                    sender0_load_frame_dout_first_words[sender0_load_frame_dout_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.frame_dout[31:0];
+                sender0_load_frame_dout_seq_idx <= sender0_load_frame_dout_seq_idx + 1;
+            end
+            if ((g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.st == 3'd2) &&
+                g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.word_valid &&
+                !g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.tx_full) begin
+                if (sender0_load_word_buf_seq_idx < 8)
+                    sender0_load_word_buf_first_words[sender0_load_word_buf_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.word_buf;
+                sender0_load_word_buf_seq_idx <= sender0_load_word_buf_seq_idx + 1;
+                if (sender0_write_word_buf_seq_idx < 8)
+                    sender0_write_word_buf_first_words[sender0_write_word_buf_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.word_buf;
+                sender0_write_word_buf_seq_idx <= sender0_write_word_buf_seq_idx + 1;
+                if (sender0_write_tx_din_seq_idx < 8)
+                    sender0_write_tx_din_first_words[sender0_write_tx_din_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.tx_din;
+                sender0_write_tx_din_seq_idx <= sender0_write_tx_din_seq_idx + 1;
+            end
+            if (g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.frame_rd_en) begin
+                if (sender0_pop_frame_dout_seq_idx < 8)
+                    sender0_pop_frame_dout_first_words[sender0_pop_frame_dout_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[0].u_port_tx_queue_sender.frame_dout[31:0];
+                sender0_pop_frame_dout_seq_idx <= sender0_pop_frame_dout_seq_idx + 1;
+            end
+
+            if ((g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.st == 3'd1) &&
+                !g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.frame_empty) begin
+                if (sender1_load_frame_dout_seq_idx < 8)
+                    sender1_load_frame_dout_first_words[sender1_load_frame_dout_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.frame_dout[31:0];
+                sender1_load_frame_dout_seq_idx <= sender1_load_frame_dout_seq_idx + 1;
+            end
+            if ((g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.st == 3'd2) &&
+                g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.word_valid &&
+                !g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.tx_full) begin
+                if (sender1_load_word_buf_seq_idx < 8)
+                    sender1_load_word_buf_first_words[sender1_load_word_buf_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.word_buf;
+                sender1_load_word_buf_seq_idx <= sender1_load_word_buf_seq_idx + 1;
+                if (sender1_write_word_buf_seq_idx < 8)
+                    sender1_write_word_buf_first_words[sender1_write_word_buf_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.word_buf;
+                sender1_write_word_buf_seq_idx <= sender1_write_word_buf_seq_idx + 1;
+                if (sender1_write_tx_din_seq_idx < 8)
+                    sender1_write_tx_din_first_words[sender1_write_tx_din_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.tx_din;
+                sender1_write_tx_din_seq_idx <= sender1_write_tx_din_seq_idx + 1;
+            end
+            if (g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.frame_rd_en) begin
+                if (sender1_pop_frame_dout_seq_idx < 8)
+                    sender1_pop_frame_dout_first_words[sender1_pop_frame_dout_seq_idx] <=
+                        g_node[0].u_node.u_node_core.g_tx[1].u_port_tx_queue_sender.frame_dout[31:0];
+                sender1_pop_frame_dout_seq_idx <= sender1_pop_frame_dout_seq_idx + 1;
+            end
+        end
+    end
     // First-hop link debug for Test 1:
     // Node0.out0 -> Node1.in1, Node0.out1 -> Node7.in0.
     //   first_words / sync_count / seen flags are gated ONLY by test1_debug_active;
@@ -1124,6 +1233,72 @@ module tb_8node_ring;
                      src0_q_din0_last, src0_q_din1_last,
                      src0_tx_din0_last, src0_tx_din1_last,
                      src0_out0_last, src0_out1_last);
+            $display("    sender0_load_frame_dout_first_words = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender0_load_frame_dout_first_words[0], sender0_load_frame_dout_first_words[1],
+                     sender0_load_frame_dout_first_words[2], sender0_load_frame_dout_first_words[3],
+                     sender0_load_frame_dout_first_words[4], sender0_load_frame_dout_first_words[5],
+                     sender0_load_frame_dout_first_words[6], sender0_load_frame_dout_first_words[7]);
+            $display("    sender0_load_word_buf_first_words   = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender0_load_word_buf_first_words[0], sender0_load_word_buf_first_words[1],
+                     sender0_load_word_buf_first_words[2], sender0_load_word_buf_first_words[3],
+                     sender0_load_word_buf_first_words[4], sender0_load_word_buf_first_words[5],
+                     sender0_load_word_buf_first_words[6], sender0_load_word_buf_first_words[7]);
+            $display("    sender0_write_word_buf_first_words  = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender0_write_word_buf_first_words[0], sender0_write_word_buf_first_words[1],
+                     sender0_write_word_buf_first_words[2], sender0_write_word_buf_first_words[3],
+                     sender0_write_word_buf_first_words[4], sender0_write_word_buf_first_words[5],
+                     sender0_write_word_buf_first_words[6], sender0_write_word_buf_first_words[7]);
+            $display("    sender0_write_tx_din_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender0_write_tx_din_first_words[0], sender0_write_tx_din_first_words[1],
+                     sender0_write_tx_din_first_words[2], sender0_write_tx_din_first_words[3],
+                     sender0_write_tx_din_first_words[4], sender0_write_tx_din_first_words[5],
+                     sender0_write_tx_din_first_words[6], sender0_write_tx_din_first_words[7]);
+            $display("    sender0_pop_frame_dout_first_words  = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender0_pop_frame_dout_first_words[0], sender0_pop_frame_dout_first_words[1],
+                     sender0_pop_frame_dout_first_words[2], sender0_pop_frame_dout_first_words[3],
+                     sender0_pop_frame_dout_first_words[4], sender0_pop_frame_dout_first_words[5],
+                     sender0_pop_frame_dout_first_words[6], sender0_pop_frame_dout_first_words[7]);
+            $display("    sender1_load_frame_dout_first_words = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender1_load_frame_dout_first_words[0], sender1_load_frame_dout_first_words[1],
+                     sender1_load_frame_dout_first_words[2], sender1_load_frame_dout_first_words[3],
+                     sender1_load_frame_dout_first_words[4], sender1_load_frame_dout_first_words[5],
+                     sender1_load_frame_dout_first_words[6], sender1_load_frame_dout_first_words[7]);
+            $display("    sender1_load_word_buf_first_words   = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender1_load_word_buf_first_words[0], sender1_load_word_buf_first_words[1],
+                     sender1_load_word_buf_first_words[2], sender1_load_word_buf_first_words[3],
+                     sender1_load_word_buf_first_words[4], sender1_load_word_buf_first_words[5],
+                     sender1_load_word_buf_first_words[6], sender1_load_word_buf_first_words[7]);
+            $display("    sender1_write_word_buf_first_words  = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender1_write_word_buf_first_words[0], sender1_write_word_buf_first_words[1],
+                     sender1_write_word_buf_first_words[2], sender1_write_word_buf_first_words[3],
+                     sender1_write_word_buf_first_words[4], sender1_write_word_buf_first_words[5],
+                     sender1_write_word_buf_first_words[6], sender1_write_word_buf_first_words[7]);
+            $display("    sender1_write_tx_din_first_words    = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender1_write_tx_din_first_words[0], sender1_write_tx_din_first_words[1],
+                     sender1_write_tx_din_first_words[2], sender1_write_tx_din_first_words[3],
+                     sender1_write_tx_din_first_words[4], sender1_write_tx_din_first_words[5],
+                     sender1_write_tx_din_first_words[6], sender1_write_tx_din_first_words[7]);
+            $display("    sender1_pop_frame_dout_first_words  = %08h %08h %08h %08h %08h %08h %08h %08h",
+                     sender1_pop_frame_dout_first_words[0], sender1_pop_frame_dout_first_words[1],
+                     sender1_pop_frame_dout_first_words[2], sender1_pop_frame_dout_first_words[3],
+                     sender1_pop_frame_dout_first_words[4], sender1_pop_frame_dout_first_words[5],
+                     sender1_pop_frame_dout_first_words[6], sender1_pop_frame_dout_first_words[7]);
+
+            if ((sender0_load_frame_dout_first_words[0] == 32'h00040000) ||
+                (sender1_load_frame_dout_first_words[0] == 32'h00040000))
+                $display("  SENDERDIAG conclusion: LOAD frame_dout starts at 00040000; tx_frame_fifo/sync_fifo dout advanced before sender lock, inspect FWFT output buffering.");
+            else if (((sender0_load_word_buf_first_words[0] == 32'hA31E57BD) ||
+                      (sender0_write_word_buf_first_words[0] == 32'hA31E57BD) ||
+                      (sender1_load_word_buf_first_words[0] == 32'hA31E57BD) ||
+                      (sender1_write_word_buf_first_words[0] == 32'hA31E57BD)) &&
+                     ((node0_txwr_port0_first_words[0] != 32'hA31E57BD) ||
+                      (node0_txwr_port1_first_words[0] != 32'hA31E57BD)))
+                $display("  SENDERDIAG conclusion: sender word_buf has SYNC but node0_txwr does not; inspect tx_wr_en/tx_din handoff into port_cdc.");
+            else if (((sender0_write_word_buf_first_words[0] == 32'hA31E57BD) ||
+                      (sender1_write_word_buf_first_words[0] == 32'hA31E57BD)) &&
+                     ((node0_out_port0_first_words[0] != 32'hA31E57BD) ||
+                      (node0_out_port1_first_words[0] != 32'hA31E57BD)))
+                $display("  SENDERDIAG conclusion: WRITE word_buf has SYNC but OUT does not; inspect port_cdc TX FIFO read timing.");
 
             if (!src0_app_frame_ready)
                 $display("  SRC0CHK conclusion: Node0 source not ready; inspect id_locked, network_congested, app_len_error, FIFO room/data_count.");
@@ -1523,6 +1698,16 @@ module tb_8node_ring;
         node0_txfifo_port1_seq_idx = 0;
         node0_out_port0_seq_idx = 0;
         node0_out_port1_seq_idx = 0;
+        sender0_load_frame_dout_seq_idx = 0;
+        sender0_load_word_buf_seq_idx = 0;
+        sender0_write_word_buf_seq_idx = 0;
+        sender0_write_tx_din_seq_idx = 0;
+        sender0_pop_frame_dout_seq_idx = 0;
+        sender1_load_frame_dout_seq_idx = 0;
+        sender1_load_word_buf_seq_idx = 0;
+        sender1_write_word_buf_seq_idx = 0;
+        sender1_write_tx_din_seq_idx = 0;
+        sender1_pop_frame_dout_seq_idx = 0;
         for (n = 0; n < 8; n = n + 1) begin
             node1_link_first_words[n] = 32'd0;
             node7_link_first_words[n] = 32'd0;
@@ -1538,6 +1723,16 @@ module tb_8node_ring;
             node0_txfifo_port1_first_words[n] = 32'd0;
             node0_out_port0_first_words[n] = 32'd0;
             node0_out_port1_first_words[n] = 32'd0;
+            sender0_load_frame_dout_first_words[n] = 32'd0;
+            sender0_load_word_buf_first_words[n] = 32'd0;
+            sender0_write_word_buf_first_words[n] = 32'd0;
+            sender0_write_tx_din_first_words[n] = 32'd0;
+            sender0_pop_frame_dout_first_words[n] = 32'd0;
+            sender1_load_frame_dout_first_words[n] = 32'd0;
+            sender1_load_word_buf_first_words[n] = 32'd0;
+            sender1_write_word_buf_first_words[n] = 32'd0;
+            sender1_write_tx_din_first_words[n] = 32'd0;
+            sender1_pop_frame_dout_first_words[n] = 32'd0;
         end
 
         send_app_frame(0, 8'd4, 4, 32'hA000_0000);
