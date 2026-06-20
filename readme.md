@@ -523,3 +523,16 @@ Vivado/XSim 中请将 `sim_1/new/tb_8node_ring.v` 的 File Type 设置为 System
 Vivado/XSim 仿真时使用 Vivado 工程中的 FIFO IP，不要把 `sim/ip_stubs.v` 加入 Vivado 仿真源，避免与 FIFO IP 模块名冲突。Icarus 仿真仍使用 `sim/ip_stubs.v`：`iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`，随后运行 `vvp sim_build/tb_8node_ring_stub.vvp > sim_build/tb_8node_ring_stub.log`。
 
 如需重新打开逐拍调试，可在 `tb_8node_ring.v` 顶部将 `ENABLE_VERBOSE_DEBUG` 设为 1，并按需要打开 `ENABLE_TEST1_DEBUG` 或 `ENABLE_TEST2_DEBUG`。本轮 stub 模式已经通过全部 5 项测试，行为 FIFO 模式也已通过全部 5 项测试。
+
+## Current Result Report
+
+This round re-checked the 8-node ring testbench after the Test 1 timeout report.
+
+- `sim_1/new/tb_8node_ring.v` is the active testbench file in this checkout.
+- The real ring link always block still runs unconditionally; it is not gated by `ENABLE_VERBOSE_DEBUG`, `ENABLE_TEST1_DEBUG`, or `ENABLE_TEST2_DEBUG`.
+- Test 1 still calls `send_app_frame(0, 8'd4, 4, 32'hA000_0000)`.
+- The testbench now latches source-side `SRC0CHK` signals during Test 1 so a timeout can report the Node0 stall layer instead of only saying "ring link problem".
+- `iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v` passed.
+- `vvp sim_build/tb_8node_ring_stub.vvp` passed and ended with `ALL TESTS PASSED`.
+- `git ls-remote origin refs/heads/main` matches the local `HEAD`, so the push target is current.
+- Vivado/XSim could not be run from this shell because `vivado` and `xsim` are not on `PATH`.

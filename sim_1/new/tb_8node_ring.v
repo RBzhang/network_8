@@ -254,6 +254,29 @@ module tb_8node_ring;
     reg [31:0] node0_out_port0_first_words [0:7];
     reg [31:0] node0_out_port1_first_words [0:7];
 
+    // Test 1 SRC0CHK source-side latches (Node0): captured during Test1 to
+    // diagnose which TX layer the source frame stalls in.  These are only
+    // ever SET during test1_debug_active (and cleared on reset / Test1 entry).
+    reg        src0_id_locked;            // Node0 id_locked ever high during Test1
+    reg        src0_app_frame_ready;      // app_frame_ready[0] ever high
+    reg        src0_app_frame_accepted;   // app_frame_accepted[0] ever high
+    reg        src0_app_frame_done;       // app_frame_done[0] ever high
+    reg        src0_network_congested;    // network_congested[0] ever high
+    reg        src0_app_len_error;        // app_len_error[0] ever high
+    reg        src0_local_req;            // local_packet_generator.packet_req
+    reg        src0_local_accept;         // local_packet_generator.packet_accept
+    reg        src0_local_app_done;       // local_packet_generator.packet_app_done
+    reg        src0_q_wr;                 // tx_frame_queue_wr_en != 0
+    reg        src0_txwr;                 // tx_wr_en != 0
+    reg        src0_valid_out;            // valid_out0[0] || valid_out1[0]
+    reg [2:0]  src0_enq_st_last;          // last seen tx_enqueue_engine.st
+    reg [33:0] src0_q_din0_last;          // last tx_frame_queue_din_flat port0 word
+    reg [33:0] src0_q_din1_last;          // last tx_frame_queue_din_flat port1 word
+    reg [31:0] src0_tx_din0_last;         // last tx_din_flat port0 word
+    reg [31:0] src0_tx_din1_last;         // last tx_din_flat port1 word
+    reg [31:0] src0_out0_last;            // last out0[0] when valid
+    reg [31:0] src0_out1_last;            // last out1[0] when valid
+
     // Test 2 focused debug and automatic diagnosis state.
     reg test2_debug_active;
     integer test2_debug_cycles;
@@ -308,6 +331,10 @@ module tb_8node_ring;
     end
 
     // Node0 TX-side sequence debug for Test 1.
+    //   IMPORTANT: collection of first_words / seq_idx is gated ONLY by
+    //   test1_debug_active so the diagnostic summary stays meaningful even when
+    //   ENABLE_VERBOSE_DEBUG=0 / ENABLE_TEST1_DEBUG=0.  Only the per-beat
+    //   $display traces are gated by ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG.
     always @(posedge clk) begin
         if (rst) begin
             node0_enq_port0_seq_idx <= 0;
@@ -332,110 +359,122 @@ module tb_8node_ring;
                 node0_out_port0_first_words[tx_rst_i] <= 32'd0;
                 node0_out_port1_first_words[tx_rst_i] <= 32'd0;
             end
-        end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
+        end else if (test1_debug_active) begin
+            // ---- Always collect first_words / counters (no verbose gate) ----
             if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en[0]) begin
-                $display("ENQSEQ node=0 port=0 idx=%0d sof=%0d eof=%0d data=%08h",
-                         node0_enq_port0_seq_idx,
-                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 + 33],
-                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 + 32],
-                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 32]);
                 if (node0_enq_port0_seq_idx < 8)
                     node0_enq_port0_first_words[node0_enq_port0_seq_idx] <=
                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 32];
                 node0_enq_port0_seq_idx <= node0_enq_port0_seq_idx + 1;
             end
             if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en[1]) begin
-                $display("ENQSEQ node=0 port=1 idx=%0d sof=%0d eof=%0d data=%08h",
-                         node0_enq_port1_seq_idx,
-                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 + 33],
-                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 + 32],
-                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 +: 32]);
                 if (node0_enq_port1_seq_idx < 8)
                     node0_enq_port1_first_words[node0_enq_port1_seq_idx] <=
                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 +: 32];
                 node0_enq_port1_seq_idx <= node0_enq_port1_seq_idx + 1;
             end
-
             if (g_node[0].u_node.u_node_core.tx_frame_queue_rd_en[0]) begin
-                $display("QSEQ node=0 port=0 idx=%0d sof=%0d eof=%0d data=%08h",
-                         node0_q_port0_seq_idx,
-                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 + 33],
-                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 + 32],
-                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 +: 32]);
                 if (node0_q_port0_seq_idx < 8)
                     node0_q_port0_first_words[node0_q_port0_seq_idx] <=
                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 +: 32];
                 node0_q_port0_seq_idx <= node0_q_port0_seq_idx + 1;
             end
             if (g_node[0].u_node.u_node_core.tx_frame_queue_rd_en[1]) begin
-                $display("QSEQ node=0 port=1 idx=%0d sof=%0d eof=%0d data=%08h",
-                         node0_q_port1_seq_idx,
-                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 + 33],
-                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 + 32],
-                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 +: 32]);
                 if (node0_q_port1_seq_idx < 8)
                     node0_q_port1_first_words[node0_q_port1_seq_idx] <=
                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 +: 32];
                 node0_q_port1_seq_idx <= node0_q_port1_seq_idx + 1;
             end
-
             if (g_node[0].u_node.u_node_core.tx_wr_en[0]) begin
-                $display("TXWRSEQ node=0 port=0 idx=%0d data=%08h",
-                         node0_txwr_port0_seq_idx,
-                         g_node[0].u_node.u_node_core.tx_din_flat[0*32 +: 32]);
                 if (node0_txwr_port0_seq_idx < 8)
                     node0_txwr_port0_first_words[node0_txwr_port0_seq_idx] <=
                         g_node[0].u_node.u_node_core.tx_din_flat[0*32 +: 32];
                 node0_txwr_port0_seq_idx <= node0_txwr_port0_seq_idx + 1;
             end
             if (g_node[0].u_node.u_node_core.tx_wr_en[1]) begin
-                $display("TXWRSEQ node=0 port=1 idx=%0d data=%08h",
-                         node0_txwr_port1_seq_idx,
-                         g_node[0].u_node.u_node_core.tx_din_flat[1*32 +: 32]);
                 if (node0_txwr_port1_seq_idx < 8)
                     node0_txwr_port1_first_words[node0_txwr_port1_seq_idx] <=
                         g_node[0].u_node.u_node_core.tx_din_flat[1*32 +: 32];
                 node0_txwr_port1_seq_idx <= node0_txwr_port1_seq_idx + 1;
             end
-
             if (!g_node[0].u_node.u_node_core.tx_empty[0]) begin
-                $display("TXFIFOSEQ node=0 port=0 idx=%0d data=%08h",
-                         node0_txfifo_port0_seq_idx,
-                         g_node[0].u_node.u_node_core.tx_dout_flat[0*32 +: 32]);
                 if (node0_txfifo_port0_seq_idx < 8)
                     node0_txfifo_port0_first_words[node0_txfifo_port0_seq_idx] <=
                         g_node[0].u_node.u_node_core.tx_dout_flat[0*32 +: 32];
                 node0_txfifo_port0_seq_idx <= node0_txfifo_port0_seq_idx + 1;
             end
             if (!g_node[0].u_node.u_node_core.tx_empty[1]) begin
-                $display("TXFIFOSEQ node=0 port=1 idx=%0d data=%08h",
-                         node0_txfifo_port1_seq_idx,
-                         g_node[0].u_node.u_node_core.tx_dout_flat[1*32 +: 32]);
                 if (node0_txfifo_port1_seq_idx < 8)
                     node0_txfifo_port1_first_words[node0_txfifo_port1_seq_idx] <=
                         g_node[0].u_node.u_node_core.tx_dout_flat[1*32 +: 32];
                 node0_txfifo_port1_seq_idx <= node0_txfifo_port1_seq_idx + 1;
             end
-
             if (valid_out0[0]) begin
-                $display("OUTSEQ node=0 port=0 idx=%0d data=%08h",
-                         node0_out_port0_seq_idx, out0[0]);
                 if (node0_out_port0_seq_idx < 8)
                     node0_out_port0_first_words[node0_out_port0_seq_idx] <= out0[0];
                 node0_out_port0_seq_idx <= node0_out_port0_seq_idx + 1;
             end
             if (valid_out1[0]) begin
-                $display("OUTSEQ node=0 port=1 idx=%0d data=%08h",
-                         node0_out_port1_seq_idx, out1[0]);
                 if (node0_out_port1_seq_idx < 8)
                     node0_out_port1_first_words[node0_out_port1_seq_idx] <= out1[0];
                 node0_out_port1_seq_idx <= node0_out_port1_seq_idx + 1;
             end
         end
+        // ---- Per-beat $display traces only when verbose enabled ----
+        if (!rst && ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
+            if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en[0])
+                $display("ENQSEQ node=0 port=0 idx=%0d sof=%0d eof=%0d data=%08h",
+                         node0_enq_port0_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 + 33],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 + 32],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 32]);
+            if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en[1])
+                $display("ENQSEQ node=0 port=1 idx=%0d sof=%0d eof=%0d data=%08h",
+                         node0_enq_port1_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 + 33],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 + 32],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 +: 32]);
+            if (g_node[0].u_node.u_node_core.tx_frame_queue_rd_en[0])
+                $display("QSEQ node=0 port=0 idx=%0d sof=%0d eof=%0d data=%08h",
+                         node0_q_port0_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 + 33],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 + 32],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[0*34 +: 32]);
+            if (g_node[0].u_node.u_node_core.tx_frame_queue_rd_en[1])
+                $display("QSEQ node=0 port=1 idx=%0d sof=%0d eof=%0d data=%08h",
+                         node0_q_port1_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 + 33],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 + 32],
+                         g_node[0].u_node.u_node_core.tx_frame_queue_dout_flat[1*34 +: 32]);
+            if (g_node[0].u_node.u_node_core.tx_wr_en[0])
+                $display("TXWRSEQ node=0 port=0 idx=%0d data=%08h",
+                         node0_txwr_port0_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_din_flat[0*32 +: 32]);
+            if (g_node[0].u_node.u_node_core.tx_wr_en[1])
+                $display("TXWRSEQ node=0 port=1 idx=%0d data=%08h",
+                         node0_txwr_port1_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_din_flat[1*32 +: 32]);
+            if (!g_node[0].u_node.u_node_core.tx_empty[0])
+                $display("TXFIFOSEQ node=0 port=0 idx=%0d data=%08h",
+                         node0_txfifo_port0_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_dout_flat[0*32 +: 32]);
+            if (!g_node[0].u_node.u_node_core.tx_empty[1])
+                $display("TXFIFOSEQ node=0 port=1 idx=%0d data=%08h",
+                         node0_txfifo_port1_seq_idx,
+                         g_node[0].u_node.u_node_core.tx_dout_flat[1*32 +: 32]);
+            if (valid_out0[0])
+                $display("OUTSEQ node=0 port=0 idx=%0d data=%08h",
+                         node0_out_port0_seq_idx, out0[0]);
+            if (valid_out1[0])
+                $display("OUTSEQ node=0 port=1 idx=%0d data=%08h",
+                         node0_out_port1_seq_idx, out1[0]);
+        end
     end
 
     // First-hop link debug for Test 1:
     // Node0.out0 -> Node1.in1, Node0.out1 -> Node7.in0.
+    //   first_words / sync_count / seen flags are gated ONLY by test1_debug_active;
+    //   $display traces are gated by ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG.
     always @(posedge clk) begin
         if (rst) begin
             seen_node1_in1_sync <= 1'b0;
@@ -448,10 +487,9 @@ module tb_8node_ring;
                 node1_link_first_words[link_rst_i] <= 32'd0;
                 node7_link_first_words[link_rst_i] <= 32'd0;
             end
-        end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
+        end else if (test1_debug_active) begin
+            // ---- Always collect (no verbose gate) ----
             if (valid_in1[1]) begin
-                $display("LINKSEQ node=1 port=1 idx=%0d data=%08h", node1_link_seq_idx, in1[1]);
-                $display("LINKDBG time=%0t node=1 port=1 data=%08h", $time, in1[1]);
                 if (node1_link_seq_idx < 8)
                     node1_link_first_words[node1_link_seq_idx] <= in1[1];
                 if (in1[1] == 32'hA31E57BD) begin
@@ -461,8 +499,6 @@ module tb_8node_ring;
                 node1_link_seq_idx <= node1_link_seq_idx + 1;
             end
             if (valid_in0[7]) begin
-                $display("LINKSEQ node=7 port=0 idx=%0d data=%08h", node7_link_seq_idx, in0[7]);
-                $display("LINKDBG time=%0t node=7 port=0 data=%08h", $time, in0[7]);
                 if (node7_link_seq_idx < 8)
                     node7_link_first_words[node7_link_seq_idx] <= in0[7];
                 if (in0[7] == 32'hA31E57BD) begin
@@ -472,9 +508,22 @@ module tb_8node_ring;
                 node7_link_seq_idx <= node7_link_seq_idx + 1;
             end
         end
+        // ---- Per-beat $display traces only when verbose enabled ----
+        if (!rst && ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
+            if (valid_in1[1]) begin
+                $display("LINKSEQ node=1 port=1 idx=%0d data=%08h", node1_link_seq_idx, in1[1]);
+                $display("LINKDBG time=%0t node=1 port=1 data=%08h", $time, in1[1]);
+            end
+            if (valid_in0[7]) begin
+                $display("LINKSEQ node=7 port=0 idx=%0d data=%08h", node7_link_seq_idx, in0[7]);
+                $display("LINKDBG time=%0t node=7 port=0 data=%08h", $time, in0[7]);
+            end
+        end
     end
 
     // RX FIFO / frame_rx debug on first-hop receivers.
+    //   first_words / sync_count / seq_idx / seen flags gated ONLY by
+    //   test1_debug_active; $display traces gated by verbose flags.
     always @(posedge clk) begin
         if (rst) begin
             seen_node1_frame_ready <= 1'b0;
@@ -489,12 +538,9 @@ module tb_8node_ring;
                 node1_rx_first_words[rx_rst_i] <= 32'd0;
                 node7_rx_first_words[rx_rst_i] <= 32'd0;
             end
-        end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
+        end else if (test1_debug_active) begin
+            // ---- Always collect (no verbose gate) ----
             if (g_node[1].u_node.u_node_core.rx_rd_en[1]) begin
-                $display("RXSEQ node=1 port=1 idx=%0d dout=%08h st=%0d",
-                         node1_rx_seq_idx,
-                         g_node[1].u_node.u_node_core.rx_dout_flat[1*32 +: 32],
-                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.st);
                 if (node1_rx_seq_idx < 8)
                     node1_rx_first_words[node1_rx_seq_idx] <= g_node[1].u_node.u_node_core.rx_dout_flat[1*32 +: 32];
                 if (g_node[1].u_node.u_node_core.rx_dout_flat[1*32 +: 32] == 32'hA31E57BD)
@@ -502,19 +548,36 @@ module tb_8node_ring;
                 node1_rx_seq_idx <= node1_rx_seq_idx + 1;
             end
             if (g_node[7].u_node.u_node_core.rx_rd_en[0]) begin
-                $display("RXSEQ node=7 port=0 idx=%0d dout=%08h st=%0d",
-                         node7_rx_seq_idx,
-                         g_node[7].u_node.u_node_core.rx_dout_flat[0*32 +: 32],
-                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.st);
                 if (node7_rx_seq_idx < 8)
                     node7_rx_first_words[node7_rx_seq_idx] <= g_node[7].u_node.u_node_core.rx_dout_flat[0*32 +: 32];
                 if (g_node[7].u_node.u_node_core.rx_dout_flat[0*32 +: 32] == 32'hA31E57BD)
                     node7_rx_sync_count <= node7_rx_sync_count + 1;
                 node7_rx_seq_idx <= node7_rx_seq_idx + 1;
             end
+            if (g_node[1].u_node.u_node_core.frame_ready[1])
+                seen_node1_frame_ready <= 1'b1;
+            if (g_node[7].u_node.u_node_core.frame_ready[0])
+                seen_node7_frame_ready <= 1'b1;
+            if (|g_node[4].u_node.u_node_core.frame_ready)
+                node4_frame_ready <= 1'b1;
+            if (app_rx_frame_valid[4])
+                node4_app_rx_frame_valid <= 1'b1;
+        end
+        // ---- Per-beat $display traces only when verbose enabled ----
+        if (!rst && ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
+            if (g_node[1].u_node.u_node_core.rx_rd_en[1])
+                $display("RXSEQ node=1 port=1 idx=%0d dout=%08h st=%0d",
+                         node1_rx_seq_idx,
+                         g_node[1].u_node.u_node_core.rx_dout_flat[1*32 +: 32],
+                         g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.st);
+            if (g_node[7].u_node.u_node_core.rx_rd_en[0])
+                $display("RXSEQ node=7 port=0 idx=%0d dout=%08h st=%0d",
+                         node7_rx_seq_idx,
+                         g_node[7].u_node.u_node_core.rx_dout_flat[0*32 +: 32],
+                         g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.st);
             if (g_node[1].u_node.u_node_core.rx_rd_en[1] ||
                 g_node[1].u_node.u_node_core.frame_ready[1] ||
-                g_node[1].u_node.u_node_core.frame_consumed[1]) begin
+                g_node[1].u_node.u_node_core.frame_consumed[1])
                 $display("RXDBG time=%0t node=1 port=1 empty=%0d rd_en=%0d dout=%08h ready=%0d consumed=%0d st=%0d crc_res=%08h crc_rcv=%08h sid=%02h did=%02h cnt=%04h plen=%04h tlen=%04h wi=%04h",
                          $time,
                          g_node[1].u_node.u_node_core.rx_empty[1],
@@ -531,10 +594,9 @@ module tb_8node_ring;
                          g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.plen,
                          g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.tlen,
                          g_node[1].u_node.u_node_core.g_rx[1].u_frame_rx.wi);
-            end
             if (g_node[7].u_node.u_node_core.rx_rd_en[0] ||
                 g_node[7].u_node.u_node_core.frame_ready[0] ||
-                g_node[7].u_node.u_node_core.frame_consumed[0]) begin
+                g_node[7].u_node.u_node_core.frame_consumed[0])
                 $display("RXDBG time=%0t node=7 port=0 empty=%0d rd_en=%0d dout=%08h ready=%0d consumed=%0d st=%0d crc_res=%08h crc_rcv=%08h sid=%02h did=%02h cnt=%04h plen=%04h tlen=%04h wi=%04h",
                          $time,
                          g_node[7].u_node.u_node_core.rx_empty[0],
@@ -551,27 +613,31 @@ module tb_8node_ring;
                          g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.plen,
                          g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.tlen,
                          g_node[7].u_node.u_node_core.g_rx[0].u_frame_rx.wi);
-            end
-
-            if (g_node[1].u_node.u_node_core.frame_ready[1])
-                seen_node1_frame_ready <= 1'b1;
-            if (g_node[7].u_node.u_node_core.frame_ready[0])
-                seen_node7_frame_ready <= 1'b1;
-            if (|g_node[4].u_node.u_node_core.frame_ready)
-                node4_frame_ready <= 1'b1;
-            if (app_rx_frame_valid[4])
-                node4_app_rx_frame_valid <= 1'b1;
         end
     end
 
     // Forwarding path debug on first-hop receivers.
+    //   seen flags gated ONLY by test1_debug_active; $display traces gated by
+    //   ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG.
     always @(posedge clk) begin
         if (rst) begin
             seen_node1_forward_req <= 1'b0;
             seen_node7_forward_req <= 1'b0;
             seen_node1_valid_out <= 1'b0;
             seen_node7_valid_out <= 1'b0;
-        end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
+        end else if (test1_debug_active) begin
+            // ---- Always collect seen flags (no verbose gate) ----
+            if (g_node[1].u_node.u_node_core.forward_req)
+                seen_node1_forward_req <= 1'b1;
+            if (g_node[7].u_node.u_node_core.forward_req)
+                seen_node7_forward_req <= 1'b1;
+            if (valid_out0[1] || valid_out1[1])
+                seen_node1_valid_out <= 1'b1;
+            if (valid_out0[7] || valid_out1[7])
+                seen_node7_valid_out <= 1'b1;
+        end
+        // ---- Per-beat $display traces only when verbose enabled ----
+        if (!rst && ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
             if (g_node[1].u_node.u_node_core.forward_candidate_valid ||
                 g_node[1].u_node.u_node_core.forward_candidate_done ||
                 g_node[1].u_node.u_node_core.forward_req ||
@@ -612,18 +678,73 @@ module tb_8node_ring;
                          valid_out0[7],
                          valid_out1[7]);
             end
-
-            if (g_node[1].u_node.u_node_core.forward_req)
-                seen_node1_forward_req <= 1'b1;
-            if (g_node[7].u_node.u_node_core.forward_req)
-                seen_node7_forward_req <= 1'b1;
-            if (valid_out0[1] || valid_out1[1])
-                seen_node1_valid_out <= 1'b1;
-            if (valid_out0[7] || valid_out1[7])
-                seen_node7_valid_out <= 1'b1;
         end
     end
 
+    // Source-side Test1 diagnostic.  Keep this independent of verbose flags so
+    // a Vivado timeout can say whether Node0 stalled before enqueue, before TX
+    // FIFO write, before port output, or at the testbench link.
+    always @(posedge clk) begin
+        if (rst) begin
+            src0_id_locked <= 1'b0;
+            src0_app_frame_ready <= 1'b0;
+            src0_app_frame_accepted <= 1'b0;
+            src0_app_frame_done <= 1'b0;
+            src0_network_congested <= 1'b0;
+            src0_app_len_error <= 1'b0;
+            src0_local_req <= 1'b0;
+            src0_local_accept <= 1'b0;
+            src0_local_app_done <= 1'b0;
+            src0_q_wr <= 1'b0;
+            src0_txwr <= 1'b0;
+            src0_valid_out <= 1'b0;
+            src0_enq_st_last <= 3'd0;
+            src0_q_din0_last <= 34'd0;
+            src0_q_din1_last <= 34'd0;
+            src0_tx_din0_last <= 32'd0;
+            src0_tx_din1_last <= 32'd0;
+            src0_out0_last <= 32'd0;
+            src0_out1_last <= 32'd0;
+        end else if (test1_debug_active) begin
+            if (g_node[0].u_node.u_node_core.id_locked)
+                src0_id_locked <= 1'b1;
+            if (app_frame_ready[0])
+                src0_app_frame_ready <= 1'b1;
+            if (app_frame_valid[0] && app_frame_ready[0])
+                src0_app_frame_accepted <= 1'b1;
+            if (app_frame_done[0])
+                src0_app_frame_done <= 1'b1;
+            if (network_congested[0])
+                src0_network_congested <= 1'b1;
+            if (app_len_error[0])
+                src0_app_len_error <= 1'b1;
+            if (g_node[0].u_node.u_node_core.local_req)
+                src0_local_req <= 1'b1;
+            if (g_node[0].u_node.u_node_core.local_accept)
+                src0_local_accept <= 1'b1;
+            if (g_node[0].u_node.u_node_core.local_app_done)
+                src0_local_app_done <= 1'b1;
+            src0_enq_st_last <= g_node[0].u_node.u_node_core.u_tx_enqueue_engine.st;
+            if (|g_node[0].u_node.u_node_core.tx_frame_queue_wr_en) begin
+                src0_q_wr <= 1'b1;
+                src0_q_din0_last <= g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[0*34 +: 34];
+                src0_q_din1_last <= g_node[0].u_node.u_node_core.tx_frame_queue_din_flat[1*34 +: 34];
+            end
+            if (|g_node[0].u_node.u_node_core.tx_wr_en) begin
+                src0_txwr <= 1'b1;
+                src0_tx_din0_last <= g_node[0].u_node.u_node_core.tx_din_flat[0*32 +: 32];
+                src0_tx_din1_last <= g_node[0].u_node.u_node_core.tx_din_flat[1*32 +: 32];
+            end
+            if (valid_out0[0]) begin
+                src0_valid_out <= 1'b1;
+                src0_out0_last <= out0[0];
+            end
+            if (valid_out1[0]) begin
+                src0_valid_out <= 1'b1;
+                src0_out1_last <= out1[0];
+            end
+        end
+    end
     genvar dbg_n;
     generate
         for (dbg_n = 0; dbg_n < NUM_NODES; dbg_n = dbg_n + 1) begin : g_test2_debug
@@ -993,6 +1114,29 @@ module tb_8node_ring;
                      node7_rx_first_words[2], node7_rx_first_words[3],
                      node7_rx_first_words[4], node7_rx_first_words[5],
                      node7_rx_first_words[6], node7_rx_first_words[7]);
+            $display("    SRC0CHK ever: id_locked=%0d app_ready=%0d app_accept=%0d app_done=%0d congested=%0d len_error=%0d",
+                     src0_id_locked, src0_app_frame_ready, src0_app_frame_accepted,
+                     src0_app_frame_done, src0_network_congested, src0_app_len_error);
+            $display("    SRC0CHK ever: local_req=%0d local_accept=%0d local_app_done=%0d q_wr=%0d tx_wr=%0d valid_out=%0d enq_st_last=%0d",
+                     src0_local_req, src0_local_accept, src0_local_app_done,
+                     src0_q_wr, src0_txwr, src0_valid_out, src0_enq_st_last);
+            $display("    SRC0CHK last: q_din0=%09h q_din1=%09h tx_din0=%08h tx_din1=%08h out0=%08h out1=%08h",
+                     src0_q_din0_last, src0_q_din1_last,
+                     src0_tx_din0_last, src0_tx_din1_last,
+                     src0_out0_last, src0_out1_last);
+
+            if (!src0_app_frame_ready)
+                $display("  SRC0CHK conclusion: Node0 source not ready; inspect id_locked, network_congested, app_len_error, FIFO room/data_count.");
+            else if (!src0_app_frame_accepted)
+                $display("  SRC0CHK conclusion: Testbench asserted Test1 send but Node0 app_frame_valid/ready handshake was not observed.");
+            else if (src0_app_frame_done && !src0_q_wr)
+                $display("  SRC0CHK conclusion: app_frame_done occurred but tx_frame_queue_wr_en never appeared; suspect local_packet_generator/tx_enqueue_engine handshake.");
+            else if (src0_q_wr && !src0_txwr)
+                $display("  SRC0CHK conclusion: tx_frame_queue_wr_en appeared but tx_wr_en never appeared; suspect tx_frame_fifo/frame_meta_fifo/port_tx_queue_sender or FIFO full.");
+            else if (src0_txwr && !src0_valid_out)
+                $display("  SRC0CHK conclusion: tx_wr_en appeared but valid_out0/valid_out1 never appeared; suspect TX async FIFO/port_cdc/Vivado FIFO model.");
+            else if (src0_valid_out && !seen_node1_in1_sync && !seen_node7_in0_sync)
+                $display("  SRC0CHK conclusion: Node0 valid_out appeared but first-hop link did not see SYNC; suspect testbench ring link pipeline or valid/data sampling.");
 
             if (((node0_enq_port0_first_words[0] == 32'hA31E57BD) &&
                  (node0_enq_port0_first_words[1] == 32'hA31E57BD)) ||
@@ -1041,7 +1185,17 @@ module tb_8node_ring;
                 $display("  DIAG detail: LINKSEQ/RXSEQ do not show first-word duplication; suspect frame_rx FIFO read consumption timing.");
             end
 
-            if (((node0_txwr_port0_first_words[0] == 32'hA31E57BD) &&
+            if (!src0_app_frame_ready)
+                $display("  DIAG conclusion: Node0 source not ready; check id_locked/network_congested/app_len_error/FIFO room before suspecting ring link.");
+            else if (!src0_app_frame_accepted)
+                $display("  DIAG conclusion: Test1 send_app_frame did not complete an app_frame_valid/ready handshake on Node0.");
+            else if (src0_app_frame_done && !src0_q_wr)
+                $display("  DIAG conclusion: Node0 accepted/done but no tx_frame_queue_wr_en; local_packet_generator/tx_enqueue_engine handshake layer.");
+            else if (src0_q_wr && !src0_txwr)
+                $display("  DIAG conclusion: Node0 queued a frame but never wrote TX FIFO; tx_frame_fifo/frame_meta_fifo/port_tx_queue_sender layer.");
+            else if (src0_txwr && !src0_valid_out)
+                $display("  DIAG conclusion: Node0 wrote TX FIFO but produced no valid_out; TX async FIFO/port_cdc/Vivado FIFO model layer.");
+            else if (((node0_txwr_port0_first_words[0] == 32'hA31E57BD) &&
                  (node0_txwr_port0_first_words[1] == 32'hA31E57BD)) ||
                 ((node0_txwr_port1_first_words[0] == 32'hA31E57BD) &&
                  (node0_txwr_port1_first_words[1] == 32'hA31E57BD)))
@@ -1332,6 +1486,25 @@ module tb_8node_ring;
         seen_node7_valid_out = 1'b0;
         node4_frame_ready = 1'b0;
         node4_app_rx_frame_valid = 1'b0;
+        src0_id_locked = 1'b0;
+        src0_app_frame_ready = 1'b0;
+        src0_app_frame_accepted = 1'b0;
+        src0_app_frame_done = 1'b0;
+        src0_network_congested = 1'b0;
+        src0_app_len_error = 1'b0;
+        src0_local_req = 1'b0;
+        src0_local_accept = 1'b0;
+        src0_local_app_done = 1'b0;
+        src0_q_wr = 1'b0;
+        src0_txwr = 1'b0;
+        src0_valid_out = 1'b0;
+        src0_enq_st_last = 3'd0;
+        src0_q_din0_last = 34'd0;
+        src0_q_din1_last = 34'd0;
+        src0_tx_din0_last = 32'd0;
+        src0_tx_din1_last = 32'd0;
+        src0_out0_last = 32'd0;
+        src0_out1_last = 32'd0;
         node1_link_seq_idx = 0;
         node7_link_seq_idx = 0;
         node1_rx_seq_idx = 0;
