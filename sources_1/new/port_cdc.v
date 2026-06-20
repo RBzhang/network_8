@@ -40,6 +40,8 @@ module port_cdc #(
             reg rst_tx_sync;
             reg [31:0] out_r;
             reg valid_out_r;
+            reg tx_rd_en_r;
+            reg tx_pop_pending;
             wire [FIFO_COUNT_W-1:0] unused_rx_wr_data_count;
 
             always @(posedge rx_clk[p]) begin
@@ -75,7 +77,7 @@ module port_cdc #(
                 .full(tx_full[p]),
                 .wr_data_count(tx_wr_data_count_flat[p*FIFO_COUNT_W +: FIFO_COUNT_W]),
                 .rd_clk(tx_clk[p]),
-                .rd_en(!tx_empty[p]),
+                .rd_en(tx_rd_en_r),
                 .dout(tx_dout_flat[p*32 +: 32]),
                 .empty(tx_empty[p])
             );
@@ -84,10 +86,25 @@ module port_cdc #(
                 if (rst_tx_sync) begin
                     out_r <= 32'd0;
                     valid_out_r <= 1'b0;
+                    tx_rd_en_r <= 1'b0;
+                    tx_pop_pending <= 1'b0;
+                end else if (tx_pop_pending) begin
+                    if (tx_rd_en_r) begin
+                        tx_rd_en_r <= 1'b0;
+                        valid_out_r <= 1'b0;
+                        tx_pop_pending <= 1'b0;
+                    end else begin
+                        tx_rd_en_r <= 1'b1;
+                        valid_out_r <= 1'b0;
+                    end
+                end else if (!tx_empty[p]) begin
+                    out_r <= tx_dout_flat[p*32 +: 32];
+                    valid_out_r <= 1'b1;
+                    tx_rd_en_r <= 1'b0;
+                    tx_pop_pending <= 1'b1;
                 end else begin
-                    valid_out_r <= !tx_empty[p];
-                    if (!tx_empty[p])
-                        out_r <= tx_dout_flat[p*32 +: 32];
+                    tx_rd_en_r <= 1'b0;
+                    valid_out_r <= 1'b0;
                 end
             end
 
