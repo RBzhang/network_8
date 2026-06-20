@@ -511,3 +511,15 @@ Test2 关键发现：源端 Node5 输出的帧序列正确，为 `a31e57bd 05010
 stub 模式本轮已完整跑到 `ALL TESTS PASSED`，没有卡在 Test2，也没有落入 Test3/Test4/Test5 的新失败点；日志里 Test2 的自动诊断摘要仍显示 `PAYLOAD2DBG`、`RXCONSUME2DBG`、`RXREPORT2DBG`、`APP2DBG` 的时序正常，且没有 A-E 故障签名。行为 FIFO 模式也同样完整跑到 `ALL TESTS PASSED`。
 
 本轮没有再改 RTL，只做了现有结论核查和日志确认；当前无需继续修 RTL。若后续再遇到超时，优先看 `wait_network_idle` 的空闲判定和 Test2 调试输出是否再次被放大，而不是先动数据通路。
+
+## Vivado/XSim 仿真注意事项
+
+当前 `tb_8node_ring.v` 已改为默认 summary-only 输出，适合 Vivado/XSim 运行。默认参数为：`ENABLE_VERBOSE_DEBUG=0`、`ENABLE_TEST1_DEBUG=0`、`ENABLE_TEST2_DEBUG=0`、`ENABLE_SUMMARY_ONLY=1`。默认日志只保留每项测试的开始、OK/FAIL、全局 timeout 和最终 `ALL TESTS PASSED`，不再逐拍输出 `TXDBG/RXDBG/FWDDBG/FWD2DBG/PAYLOAD2DBG/RXCONSUME2DBG/DEDUP2DBG/SRC2DBG/RXIN2DBG/RXREPORT2DBG/APP2DBG/ENQSEQ/QSEQ/TXWRSEQ/TXFIFOSEQ/OUTSEQ/LINKSEQ/RXSEQ/MONITOR`。
+
+真实 ring link pipeline 已确认保持无条件运行：`link_data_cw <= out0`、`link_valid_cw <= valid_out0`、`link_data_ccw <= out1`、`link_valid_ccw <= valid_out1` 不受任何 debug 开关或 `test1_debug_active/test2_debug_active` 控制。
+
+Vivado/XSim 中请将 `sim_1/new/tb_8node_ring.v` 的 File Type 设置为 SystemVerilog，或将 testbench 文件改名为 `.sv`。该 testbench 使用 `for (integer i = 0; ...)` 等 SystemVerilog 写法；Icarus 仿真仍使用 `-g2012`。
+
+Vivado/XSim 仿真时使用 Vivado 工程中的 FIFO IP，不要把 `sim/ip_stubs.v` 加入 Vivado 仿真源，避免与 FIFO IP 模块名冲突。Icarus 仿真仍使用 `sim/ip_stubs.v`：`iverilog -g2012 -o sim_build/tb_8node_ring_stub.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_ring.v`，随后运行 `vvp sim_build/tb_8node_ring_stub.vvp > sim_build/tb_8node_ring_stub.log`。
+
+如需重新打开逐拍调试，可在 `tb_8node_ring.v` 顶部将 `ENABLE_VERBOSE_DEBUG` 设为 1，并按需要打开 `ENABLE_TEST1_DEBUG` 或 `ENABLE_TEST2_DEBUG`。本轮 stub 模式已经通过全部 5 项测试，行为 FIFO 模式也已通过全部 5 项测试。

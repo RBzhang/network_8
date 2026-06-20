@@ -7,6 +7,11 @@
 //------------------------------------------------------------------------------
 module tb_8node_ring;
 
+    localparam ENABLE_VERBOSE_DEBUG = 0;
+    localparam ENABLE_TEST1_DEBUG   = 0;
+    localparam ENABLE_TEST2_DEBUG   = 0;
+    localparam ENABLE_SUMMARY_ONLY  = 1;
+
     localparam NUM_NODES   = 8;
     localparam CLK_PERIOD  = 10;          // 10 ns = 100 MHz
     localparam SIM_CLK_FREQ = 500000000; // tick_1s every 5e8 cycles (~5s), slow enough to not interfere
@@ -22,6 +27,11 @@ module tb_8node_ring;
 
     always #(CLK_PERIOD/2) clk = ~clk;
 
+    initial begin
+        #100_000_000;  // 100 ms at 1 ns timescale.
+        $display("GLOBAL TIMEOUT: simulation did not finish in 100 ms");
+        $fatal(1);
+    end
     //--------------------------------------------------------------------------
     // Per-node signals
     //--------------------------------------------------------------------------
@@ -291,7 +301,7 @@ module tb_8node_ring;
     // Monitor: print when any valid_out goes high
     always @(posedge clk) begin
         for (integer mi = 0; mi < NUM_NODES; mi = mi + 1) begin
-            if (test1_debug_active && (valid_out0[mi] || valid_out1[mi]))
+            if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active && (valid_out0[mi] || valid_out1[mi]))
                 $display("  MONITOR time=%0t: node%0d vout0=%0d vout1=%0d",
                          $time, mi, valid_out0[mi], valid_out1[mi]);
         end
@@ -322,7 +332,7 @@ module tb_8node_ring;
                 node0_out_port0_first_words[tx_rst_i] <= 32'd0;
                 node0_out_port1_first_words[tx_rst_i] <= 32'd0;
             end
-        end else if (test1_debug_active) begin
+        end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
             if (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en[0]) begin
                 $display("ENQSEQ node=0 port=0 idx=%0d sof=%0d eof=%0d data=%08h",
                          node0_enq_port0_seq_idx,
@@ -438,7 +448,7 @@ module tb_8node_ring;
                 node1_link_first_words[link_rst_i] <= 32'd0;
                 node7_link_first_words[link_rst_i] <= 32'd0;
             end
-        end else if (test1_debug_active) begin
+        end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
             if (valid_in1[1]) begin
                 $display("LINKSEQ node=1 port=1 idx=%0d data=%08h", node1_link_seq_idx, in1[1]);
                 $display("LINKDBG time=%0t node=1 port=1 data=%08h", $time, in1[1]);
@@ -479,7 +489,7 @@ module tb_8node_ring;
                 node1_rx_first_words[rx_rst_i] <= 32'd0;
                 node7_rx_first_words[rx_rst_i] <= 32'd0;
             end
-        end else if (test1_debug_active) begin
+        end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
             if (g_node[1].u_node.u_node_core.rx_rd_en[1]) begin
                 $display("RXSEQ node=1 port=1 idx=%0d dout=%08h st=%0d",
                          node1_rx_seq_idx,
@@ -561,7 +571,7 @@ module tb_8node_ring;
             seen_node7_forward_req <= 1'b0;
             seen_node1_valid_out <= 1'b0;
             seen_node7_valid_out <= 1'b0;
-        end else if (test1_debug_active) begin
+        end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active) begin
             if (g_node[1].u_node.u_node_core.forward_candidate_valid ||
                 g_node[1].u_node.u_node_core.forward_candidate_done ||
                 g_node[1].u_node.u_node_core.forward_req ||
@@ -628,7 +638,7 @@ module tb_8node_ring;
                     test2_queue_seen[dbg_n][0] <= 32'd0;
                     test2_queue_seen[dbg_n][1] <= 32'd0;
                     test2_queue_seen[dbg_n][2] <= 32'd0;
-                end else if (test2_debug_active) begin
+                end else if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST2_DEBUG && test2_debug_active) begin
                     if (test2_debug_cycles < 1200) begin
                         if (g_node[dbg_n].u_node.u_node_core.forward_candidate_valid ||
                             g_node[dbg_n].u_node.u_node_core.forward_req ||
@@ -763,7 +773,7 @@ module tb_8node_ring;
             test2_debug_cycles <= 0;
         end else begin
             test2_debug_cycles <= test2_debug_cycles + 1;
-            if (test2_debug_cycles < 1200) begin
+            if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST2_DEBUG && test2_debug_cycles < 1200) begin
                 if (app_rx_frame_valid[1] || app_rx_payload_valid[1]) begin
                     $display("APP2DBG time=%0t node=1 frame_valid=%0d src=%02h dst=%02h count=%04h len=%04h payload_valid=%0d addr=%0d data=%08h rfifo_st=%0d",
                              $time, app_rx_frame_valid[1], app_rx_src_id[1], app_rx_dst_id[1], app_rx_count[1], app_rx_len16[1],
@@ -1361,25 +1371,31 @@ module tb_8node_ring;
         expected_counts_g[4] = expected_counts_g[4] + 1;
 
         // Debug: check TX path activity after send_frame
-        $display("  DEBUG: send_app_frame completed at time %0t", $time);
-        $display("  DEBUG: node0 app_frame_done=%0d network_congested=%0d",
-                 app_frame_done[0], network_congested[0]);
+        if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG) begin
+            $display("  DEBUG: send_app_frame completed at time %0t", $time);
+            $display("  DEBUG: node0 app_frame_done=%0d network_congested=%0d",
+                     app_frame_done[0], network_congested[0]);
+        end
         repeat (50) @(posedge clk);
-        $display("  DEBUG after 50 cycles: node0 out0=%0h v0=%0d out1=%0h v1=%0d",
-                 out0[0], valid_out0[0], out1[0], valid_out1[0]);
-        $display("  DEBUG: all valid_outs: %0d%0d%0d%0d%0d%0d%0d%0d",
-                 valid_out0[0],valid_out0[1],valid_out0[2],valid_out0[3],
-                 valid_out0[4],valid_out0[5],valid_out0[6],valid_out0[7]);
+        if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG) begin
+            $display("  DEBUG after 50 cycles: node0 out0=%0h v0=%0d out1=%0h v1=%0d",
+                     out0[0], valid_out0[0], out1[0], valid_out1[0]);
+            $display("  DEBUG: all valid_outs: %0d%0d%0d%0d%0d%0d%0d%0d",
+                     valid_out0[0],valid_out0[1],valid_out0[2],valid_out0[3],
+                     valid_out0[4],valid_out0[5],valid_out0[6],valid_out0[7]);
+        end
 
         wait_for_rx_frames_no_fatal(4, expected_counts_g[4], TIMEOUT_CYCLES, test1_timed_out);
 
         // Debug: show received frame counts
-        for (n = 0; n < NUM_NODES; n = n + 1)
-            $display("  DEBUG Node %0d: received_frame_count=%0d last_rx_src=%0d last_rx_dst=%0d",
-                     n, received_frame_count[n], last_rx_src[n], last_rx_dst[n]);
+        if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG) begin
+            for (n = 0; n < NUM_NODES; n = n + 1)
+                $display("  DEBUG Node %0d: received_frame_count=%0d last_rx_src=%0d last_rx_dst=%0d",
+                         n, received_frame_count[n], last_rx_src[n], last_rx_dst[n]);
+        end
 
         if (test1_timed_out) begin
-            $display("Node4 δ�յ��κ� app_rx ֡");
+            $display("Node4 δ�յ��κ� app_rx ֡");
             print_test1_diagnostic();
             $fatal(1, "TEST 1 failed before checking last_rx fields");
         end
@@ -1423,7 +1439,8 @@ module tb_8node_ring;
         wait_network_idle(1000);
         check_unicast_received(1, 8'd5, 8'd1, 3, 32'hB000_0000, expected_counts_g[1]);
         check_no_unexpected_frames(5, 1);
-        print_test2_diagnostic();
+        if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST2_DEBUG)
+            print_test2_diagnostic();
         test2_debug_active = 1'b0;
 
         $display("============================================================");
@@ -1499,7 +1516,7 @@ module tb_8node_ring;
         $finish;
     end
     always @(posedge clk) begin
-    if (test1_debug_active &&
+    if (ENABLE_VERBOSE_DEBUG && ENABLE_TEST1_DEBUG && test1_debug_active &&
         (g_node[0].u_node.u_node_core.tx_frame_queue_wr_en != 0 ||
         g_node[0].u_node.u_node_core.tx_frame_meta_wr_en != 0 ||
         g_node[0].u_node.u_node_core.tx_wr_en != 0 ||
