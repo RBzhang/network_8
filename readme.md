@@ -404,6 +404,63 @@ $finish called at time : 167095 ns
 2. 设置顶层模块为 `tb_8node_init_variants`
 3. Run Behavioral Simulation
 
+### 全节点单播矩阵测试 (2026-06-21, Vivado/XSim)
+
+新增独立 testbench `sim_1/new/tb_8node_unicast_matrix.v`，对 8 节点环网执行完整的 8×7=56 条单播路径覆盖测试。每条路径使用轮换的 payload 长度，payload 内容编码 src/dst/test_index 便于定位错误。
+
+#### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_unicast_matrix.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 仿真工具 | Vivado XSim |
+| 测试日期 | 2026-06-21 |
+
+#### 测试设计
+
+- **payload 长度轮换**：`{1, 2, 3, 4, 7, 16, 64, 256}`，按 `test_index % 8` 循环，每个长度覆盖 7 条路径
+- **base_data 编码**：`32'h1000_0000 + (src<<16) + (dst<<8) + test_index`，payload word k = base_data + k
+- **逐包确认**：每包流程为 快照基线 → 发包 → 等目标收到 → 校验 header+payload → 验证非目标无误收 → wait_network_idle
+
+#### 测试用例
+
+| src | dst 覆盖 | 路径数 | payload 长度分布 |
+|-----|----------|--------|-----------------|
+| 0 | 1,2,3,4,5,6,7 | 7 | len=1,2,3,4,7,16,64 |
+| 1 | 0,2,3,4,5,6,7 | 7 | len=256,1,2,3,4,7,16 |
+| 2 | 0,1,3,4,5,6,7 | 7 | len=64,256,1,2,3,4,7 |
+| 3 | 0,1,2,4,5,6,7 | 7 | len=16,64,256,1,2,3,4 |
+| 4 | 0,1,2,3,5,6,7 | 7 | len=7,16,64,256,1,2,3 |
+| 5 | 0,1,2,3,4,6,7 | 7 | len=4,7,16,64,256,1,2 |
+| 6 | 0,1,2,3,4,5,7 | 7 | len=3,4,7,16,64,256,1 |
+| 7 | 0,1,2,3,4,5,6 | 7 | len=2,3,4,7,16,64,256 |
+
+#### 测试结果
+
+**Vivado/XSim 行为仿真：ALL UNICAST MATRIX TESTS PASSED (56/56)**
+
+```
+8-NODE UNICAST MATRIX TEST: 56 paths (8 src x 7 dst)
+============================================================
+  PASS [1/56] Node0 -> Node1   len=1
+  PASS [2/56] Node0 -> Node2   len=2
+  ...
+  PASS [56/56] Node7 -> Node6  len=256
+============================================================
+ ALL UNICAST MATRIX TESTS PASSED  (56/56)
+============================================================
+```
+
+56 条单播路径全部可达，非目标节点无误收，payload 校验全部通过。rx_overflow 仅在广播/大 payload 测试中有瞬时记录，不影响帧正确投递。
+
+#### 运行仿真
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_unicast_matrix.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_unicast_matrix`
+3. Run Behavioral Simulation
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
