@@ -360,6 +360,50 @@ vvp sim_build/tb_8node_ring_stub.vvp
 
 5 项测试全部通过。rx_overflow 粘性标志在所有节点上均有记录（广播测试瞬时 FIFO 满载触发），不影响帧正确投递。
 
+### 节点初始化变体测试 (2026-06-21, Vivado/XSim)
+
+新增独立 testbench `sim_1/new/tb_8node_init_variants.v`，验证 8 节点在多种 `node_id_valid` 初始化顺序、部分初始化和重复 ID 脉冲下的鲁棒性。该 testbench 复用 `tb_8node_ring.v` 的 8 节点例化与环形连接方式，不修改原有 testbench。
+
+#### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_init_variants.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 仿真工具 | Vivado XSim |
+| 测试日期 | 2026-06-21 |
+
+#### 测试用例
+
+| # | Case | 描述 | 验证点 |
+|---|------|------|--------|
+| 1 | 正序初始化 | 依次初始化 Node0→Node7，执行 Node0→4、Node3→7、Node6→1 单播 | 目标节点只收一次，非目标不误收 |
+| 2 | 反序初始化 | 依次初始化 Node7→Node0，执行 Node0→5、Node2→6 单播 + Node1→all 广播 | 反序不影响通信；广播所有节点各收一次 |
+| 3 | 随机序初始化 | 按 3,0,7,2,6,1,5,4 固定伪随机序初始化，执行 Node0→4、Node5→1 | 跨环通信正常 |
+| 4 | 部分节点未初始化发包 | 只初始化 Node0-3，发送 Node0→Node4（目标未初始化），再补初始化 Node4-7，再次 Node0→Node4 | 无错误上报/未知节点乱收包/仿真卡死；补初始化后正常通信 |
+| 5 | 重复 node_id_valid | Node3 首次锁 ID=3，二次脉冲给 ID=6，验证 Node0→3 成功、Node0→6 不被 Node3 错收 | `node_id_latch` 只锁第一次有效脉冲 |
+
+#### 测试结果
+
+**Vivado/XSim 行为仿真：ALL INIT VARIANT TESTS PASSED**
+
+```
+CASE 1: Sequential init Node0 -> Node7    — PASSED
+CASE 2: Reverse init Node7 -> Node0       — PASSED
+CASE 3: Random order init 3,0,7,2,6,1,5,4 — PASSED
+CASE 4: Partial init, send, then complete — PASSED
+CASE 5: Duplicate node_id_valid           — PASSED
+ALL INIT VARIANT TESTS PASSED
+$finish called at time : 167095 ns
+```
+
+#### 运行仿真
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_init_variants.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_init_variants`
+3. Run Behavioral Simulation
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
