@@ -530,6 +530,104 @@ $finish called at time : 913895 ns
 2. 设置顶层模块为 `tb_8node_concurrent_traffic`
 3. Run Behavioral Simulation
 
+### 协议容错测试 (2026-06-21, iverilog 12.0)
+
+新增独立 testbench `sim_1/new/tb_8node_protocol_fault.v`，验证 `frame_rx` 的协议边界处理能力，包括 CRC 错误、len16 越界、payload 内含同步头、同步头前有垃圾数据、半帧中断等场景。通过 Node1.in0 的注入 mux 直接发送原始字流，绕过正常的 app→TX→ring 路径以精确控制错误帧。
+
+#### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_protocol_fault.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 注入点 | Node1.in0 通过 mux 切换（`inject_enable` 控制） |
+| CRC 多项式 | `0x04C11DB7`，初值 `0xFFFFFFFF`，最终 XOR `0xFFFFFFFF` |
+| 仿真工具 | iverilog 12.0 |
+| 测试日期 | 2026-06-21 |
+
+#### 注入机制
+
+Node1 的 `in0` 在生成式环形连接之外通过 mux 控制：
+
+```
+assign in0[1]      = inject_enable ? inject_data  : link_data_ccw[2];
+assign valid_in0[1] = inject_enable ? inject_valid : link_valid_ccw[2];
+```
+
+`inject_enable=1` 时 Node1.in0 完全由 testbench 驱动，`inject_word(w)` 任务每拍驱动一个 32-bit word。其他 7 个节点的环形连接不变。
+
+#### CRC32 测试平台函数
+
+```verilog
+function [31:0] crc32_word;
+    input [31:0] crc_in;
+    input [31:0] data;
+    // 32 级并行 LFSR，位序 data[31]→data[0]，多项式 0x04C11DB7
+    // 与 RTL crc32_calc.v 逐位等价
+endfunction
+```
+
+正确 CRC = `crc32_word(...) ^ 32'hFFFFFFFF`（覆盖 header1 + header2 + payload，不含 SYNC_WORD 和 CRC 字本身）。
+
+#### 测试用例
+
+| # | Case | 描述 | 注入序列 | 验证点 |
+|---|------|------|---------|--------|
+| 1 | CRC 错误帧 | 在合法 CRC 基础上 xor `0x00000001` | SYNC+hdr1+hdr2+2payload+BadCRC | `received_frame_count[1]` 不增加 |
+| 2 | len16 越界 | len=`0xFFFF`（>MAX_PAYLOAD=256） | SYNC+hdr1+hdr2(len=0xFFFF)+垃圾字 | HEADER2 直接回 HUNT；后续正常帧被正确接收 |
+| 3 | payload 含同步头 | payload[0]=`SYNC_WORD`(`0xA31E57BD`) | SYNC+hdr1+hdr2+SYNC_WORD+payload[1]+CRC | 不误判为新帧同步头，payload 完整 |
+| 4 | 同步头前垃圾 | 10 个不包含 SYNC_WORD 的有效字 | 10×垃圾 + 合法帧 | HUNT 态丢弃垃圾后成功同步 |
+| 5 | 半帧中断 | 发送 2/4 payload 后停止，再用垃圾字补全使其到达 CRC 并失败 | SYNC+hdr(len=4)+2payload → idle → 2垃圾payload+垃圾CRC | 半帧无 app_rx 上报；后续正常帧被正确接收 |
+
+#### 测试结果
+
+**iverilog 12.0 仿真：ALL PROTOCOL FAULT TESTS PASSED**
+
+```
+============================================================
+ CASE 1: CRC error frame (src=0, dst=1, len=2)
+============================================================
+  Good CRC = 5ede8392, Bad CRC = 5ede8393
+  PASS: Node1 correctly ignored CRC error frame
+============================================================
+ CASE 2: len16 overflow (len=16'hFFFF)
+============================================================
+  PASS: len overflow rejected, recovery frame received correctly
+============================================================
+ CASE 3: payload contains SYNC_WORD (32'hA31E57BD)
+============================================================
+  PASS: SYNC_WORD in payload handled correctly, no false re-sync
+============================================================
+ CASE 4: garbage words before valid frame
+============================================================
+  PASS: frame_rx re-synchronized after garbage preamble
+============================================================
+ CASE 5: half-frame abort (send partial payload then stop)
+============================================================
+  PASS: half-frame did not produce app_rx
+  PASS: system recovered and received valid frame after half-frame abort
+============================================================
+ ALL PROTOCOL FAULT TESTS PASSED
+============================================================
+$finish called at 39155000 (1ps)
+```
+
+5 项测试全部通过。`frame_rx` 的 HUNT/HEADER1/HEADER2/PAYLOAD/CRC/CHECK 状态机在以下场景均正确工作：丢弃 CRC 错误帧、拒绝 len16 越界帧、不因 payload 中的 SYNC_WORD 误触发重新同步、在垃圾字前导后恢复同步、丢弃不完整帧后正常接收后续帧。
+
+#### 运行仿真
+
+**iverilog:**
+```powershell
+cd D:\wurenji\network\gtwizard_0_ex.srcs
+iverilog -g2012 -o sim_build/tb_8node_protocol_fault.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_protocol_fault.v
+vvp sim_build/tb_8node_protocol_fault.vvp
+```
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_protocol_fault.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_protocol_fault`
+3. Run Behavioral Simulation
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
