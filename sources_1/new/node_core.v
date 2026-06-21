@@ -447,6 +447,7 @@ module node_core #(
             tx_frame_fifo #(
                 .DEPTH(FIFO_DEPTH),
                 .WIDTH(34),
+                .USE_IP(`ifdef IVERILOG_SIM 0 `else 1 `endif),
                 .COUNT_W(TX_FRAME_QUEUE_COUNT_W)
             ) u_tx_frame_fifo (
                 .clk(clk),
@@ -463,6 +464,7 @@ module node_core #(
             frame_meta_fifo #(
                 .DEPTH(FIFO_DEPTH),
                 .TIME_W(TX_QUEUE_TIME_W),
+                .USE_IP(`ifdef IVERILOG_SIM 0 `else 1 `endif),
                 .COUNT_W(TX_FRAME_QUEUE_COUNT_W)
             ) u_frame_meta_fifo (
                 .clk(clk),
