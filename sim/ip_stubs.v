@@ -134,3 +134,109 @@ module fifo_generator_sync (
         end
     end
 endmodule
+
+//------------------------------------------------------------------------------
+// tx_frame_fifo IP stub: fifo_generato_txframe
+//   34-bit wide sync FIFO, depth 8192, FWFT, srst
+//------------------------------------------------------------------------------
+module fifo_generato_txframe (
+    input  wire        clk,
+    input  wire        srst,
+    input  wire [33:0] din,
+    input  wire        wr_en,
+    input  wire        rd_en,
+    output wire [33:0] dout,
+    output wire        full,
+    output wire        empty,
+    output wire [13:0] data_count
+);
+    parameter DEPTH = 8192;
+    parameter ADDR_W = 13;
+
+    reg [33:0] mem [0:DEPTH-1];
+    reg [ADDR_W:0] count;
+    reg [ADDR_W-1:0] wptr, rptr;
+
+    assign empty = (count == 0);
+    assign full  = (count == DEPTH);
+    assign dout  = mem[rptr];
+    assign data_count = count[13:0];
+
+    always @(posedge clk) begin
+        if (srst) begin
+            wptr <= 0;
+            rptr <= 0;
+            count <= 0;
+        end else begin
+            case ({wr_en && !full, rd_en && !empty})
+                2'b10: begin
+                    mem[wptr] <= din;
+                    wptr <= (wptr == DEPTH - 1) ? 0 : wptr + 1;
+                    count <= count + 1;
+                end
+                2'b01: begin
+                    rptr <= (rptr == DEPTH - 1) ? 0 : rptr + 1;
+                    count <= count - 1;
+                end
+                2'b11: begin
+                    mem[wptr] <= din;
+                    wptr <= (wptr == DEPTH - 1) ? 0 : wptr + 1;
+                    rptr <= (rptr == DEPTH - 1) ? 0 : rptr + 1;
+                end
+            endcase
+        end
+    end
+endmodule
+
+//------------------------------------------------------------------------------
+// frame_meta_fifo IP stub: fifo_generator_meta
+//   48-bit wide sync FIFO, depth 512, FWFT, srst
+//------------------------------------------------------------------------------
+module fifo_generator_meta (
+    input  wire        clk,
+    input  wire        srst,
+    input  wire [47:0] din,
+    input  wire        wr_en,
+    input  wire        rd_en,
+    output wire [47:0] dout,
+    output wire        full,
+    output wire        empty,
+    output wire [9:0]  data_count
+);
+    parameter DEPTH = 512;
+    parameter ADDR_W = 9;
+
+    reg [47:0] mem [0:DEPTH-1];
+    reg [ADDR_W:0] count;
+    reg [ADDR_W-1:0] wptr, rptr;
+
+    assign empty = (count == 0);
+    assign full  = (count == DEPTH);
+    assign dout  = mem[rptr];
+    assign data_count = count[9:0];
+
+    always @(posedge clk) begin
+        if (srst) begin
+            wptr <= 0;
+            rptr <= 0;
+            count <= 0;
+        end else begin
+            case ({wr_en && !full, rd_en && !empty})
+                2'b10: begin
+                    mem[wptr] <= din;
+                    wptr <= (wptr == DEPTH - 1) ? 0 : wptr + 1;
+                    count <= count + 1;
+                end
+                2'b01: begin
+                    rptr <= (rptr == DEPTH - 1) ? 0 : rptr + 1;
+                    count <= count - 1;
+                end
+                2'b11: begin
+                    mem[wptr] <= din;
+                    wptr <= (wptr == DEPTH - 1) ? 0 : wptr + 1;
+                    rptr <= (rptr == DEPTH - 1) ? 0 : rptr + 1;
+                end
+            endcase
+        end
+    end
+endmodule

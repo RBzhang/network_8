@@ -484,6 +484,17 @@ vvp sim_build\tb_8node_ring.vvp
 
 完整 5 项测试尚未全部通过：Test 2 `Node5 -> Node1` 暴露新的失败点，Node1 最终检查到 `expected len=3, got len=1281`。日志显示第一份转发帧可以按 `05010000 00030000 b0000000 b0000001 b0000002 3ba7f20a` 到达 Node1，但随后又出现第二份同源同 count 的重复转发帧，其中 Node0 转发侧 `QSEQ/TXWRSEQ` payload 变成 `00000000 00000000 00000000`。该问题已经超出本轮 `port_tx_queue_sender` 同拍写修复范围，下一步应单独检查转发去重和 `tx_enqueue_engine` 读取 forward payload 时的 `payload_index/payload_data` 稳定时序。
 
+## Vivado XSim 仿真修复
+
+Vivado 行为级仿真 `[USF-XSim-62] elaborate step failed` 的根因是 `fifo_generato_txframe` 和 `fifo_generator_meta` 两个 IP 的仿真源文件未被 Vivado 编译进 `sim_1` 仿真文件集。
+
+- **根因**：`fifo_generato_txframe` 和 `fifo_generator_meta` 在 `.xpr` 中位于独立的 `BlockSrcs` 文件集，`sim_1` 文件集的 `SrcSet` 仅指向 `sources_1`，不包含这两个 BlockSrcs IP。`xvlog` 分析阶段只编译了 `fifo_generator_32_512`（在 `sources_1` 内）和 `fifo_generator_sync`，未编译 `fifo_generato_txframe` 和 `fifo_generator_meta`。elaborate 阶段因找不到模块 `fifo_generato_txframe` 而失败。
+- **修复**：
+  - `sim/ip_stubs.v` 新增 `fifo_generato_txframe`（34-bit × 8192, FWFT）和 `fifo_generator_meta`（48-bit × 512, FWFT）行为 stub 模块，与已有的 `fifo_generator_32_512` / `fifo_generator_sync` stub 风格一致。
+  - `gtwizard_0_ex.xpr` 的 `sim_1` 文件集中加入 `sim/ip_stubs.v`，`UsedIn=simulation`，确保 Vivado XSim 编译时包含 stub 定义。
+- **影响范围**：`sim/ip_stubs.v`、`gtwizard_0_ex.xpr`。
+- **iverilog 兼容**：iverilog 编译命令已包含 `sim/ip_stubs.v`，自动获得新 stub。
+
 ## 发布脚本
 
 仓库新增了一个 PowerShell 发布脚本：[`scripts/publish_to_main.ps1`](scripts/publish_to_main.ps1)。
