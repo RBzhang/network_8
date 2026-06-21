@@ -175,7 +175,8 @@ module tb_8node_concurrent_traffic;
             assign valid_in0[gi2] = link_valid_ccw[(gi2 + 1) % NUM_NODES];
         end
     endgenerate
-integer i_pipe;
+
+    integer i_pipe;
     always @(posedge clk) begin
         
         if (rst) begin
@@ -241,6 +242,12 @@ integer i_pipe;
     //   case_rx_payload stores up to MAX_CAP_PAYLOAD words per received frame
     //   so per-word checking does not depend on the shared rx_payload_mem
     //   (which is overwritten by subsequent frames).
+    //
+    //   FIX: case_active only gates new capture, NOT clearing of already-
+    //   captured results.  clear_scoreboard() is the sole clearing mechanism.
+    //
+    //   FIX: case_rx_cap_sel tracks the frame index to which the current
+    //   payload word belongs, avoiding reliance on case_rx_count-1.
     //--------------------------------------------------------------------------
     localparam MAX_CAP_PAYLOAD = 256;
 
@@ -250,13 +257,15 @@ integer i_pipe;
     integer case_rx_dst   [0:NUM_NODES-1][0:MAX_EXP-1];
     integer case_rx_len   [0:NUM_NODES-1][0:MAX_EXP-1];
     integer case_rx_payload [0:NUM_NODES-1][0:MAX_EXP-1][0:MAX_CAP_PAYLOAD-1];
+    integer case_rx_cap_sel [0:NUM_NODES-1];
 
     genvar sbn;
     generate
         for (sbn = 0; sbn < NUM_NODES; sbn = sbn + 1) begin : g_sb_cap
             always @(posedge clk) begin
-                if (rst || !case_active) begin
+                if (rst) begin
                     case_rx_count[sbn] <= 0;
+                    case_rx_cap_sel[sbn] <= 0;
                 end else if (case_active) begin
                     if (app_rx_frame_valid[sbn] && app_rx_frame_ready[sbn]) begin
                         if (case_rx_count[sbn] < MAX_EXP) begin
@@ -264,12 +273,12 @@ integer i_pipe;
                             case_rx_dst[sbn][case_rx_count[sbn]] <= app_rx_dst_id[sbn];
                             case_rx_len[sbn][case_rx_count[sbn]] <= app_rx_len16[sbn];
                         end
+                        case_rx_cap_sel[sbn] <= case_rx_count[sbn];
                         case_rx_count[sbn] <= case_rx_count[sbn] + 1;
                     end
                     if (app_rx_payload_valid[sbn] && app_rx_payload_ready[sbn]) begin
-                        if (case_rx_count[sbn] > 0 && case_rx_count[sbn] <= MAX_EXP &&
-                            app_rx_payload_addr[sbn] < MAX_CAP_PAYLOAD) begin
-                            case_rx_payload[sbn][case_rx_count[sbn] - 1][app_rx_payload_addr[sbn]]
+                        if (app_rx_payload_addr[sbn] < MAX_CAP_PAYLOAD) begin
+                            case_rx_payload[sbn][case_rx_cap_sel[sbn]][app_rx_payload_addr[sbn]]
                                 <= app_rx_payload_data[sbn];
                         end
                     end
@@ -291,11 +300,12 @@ integer i_pipe;
     integer exp_base  [0:NUM_NODES-1][0:MAX_EXP-1];
     integer exp_matched [0:NUM_NODES-1][0:MAX_EXP-1];
 
-        integer n, i;
+    integer n, i;
     integer conc_senders [0:7];
     integer conc_dsts    [0:7];
     integer conc_lens    [0:7];
     integer conc_bases   [0:7];
+
     //--------------------------------------------------------------------------
     // Tasks
     //--------------------------------------------------------------------------
@@ -306,6 +316,7 @@ integer i_pipe;
             for (nd = 0; nd < NUM_NODES; nd = nd + 1) begin
                 exp_count[nd] = 0;
                 case_rx_count[nd] = 0;
+                case_rx_cap_sel[nd] = 0;
                 for (i = 0; i < MAX_EXP; i = i + 1) begin
                     exp_src[nd][i] = 0;
                     exp_fdst[nd][i] = 0;
@@ -338,16 +349,25 @@ integer i_pipe;
     endtask
 
     // ---- send_concurrent: assert N app_frame_valid in the same time step ----
+    //   FIX: per-sender accepted_latched tracking prevents double-clearing.
+    //   Each sender independently clears its own valid/dst/len after accepted.
+    //   Wait for ALL senders to see app_frame_done before returning.
+    //   Final cleanup deasserts all sender signals regardless.
     task send_concurrent;
         input integer num_senders;
         integer i, k;
+        reg [7:0] accepted_latched;
         reg [7:0] done_latched;
         reg [7:0] sender_mask;
         begin
             sender_mask = 0;
+            accepted_latched = 0;
+            done_latched = 0;
+
             for (i = 0; i < num_senders; i = i + 1) begin
                 for (k = 0; k < conc_lens[i]; k = k + 1)
                     payload_mem[conc_senders[i]][k] = conc_bases[i] + k;
+
                 app_dst_id[conc_senders[i]] = conc_dsts[i][7:0];
                 app_len16[conc_senders[i]] = conc_lens[i][15:0];
                 sender_mask[conc_senders[i]] = 1'b1;
@@ -356,20 +376,31 @@ integer i_pipe;
             for (i = 0; i < num_senders; i = i + 1)
                 app_frame_valid[conc_senders[i]] = 1'b1;
 
-            done_latched = 0;
             while (done_latched != sender_mask) begin
                 @(posedge clk);
+
                 for (i = 0; i < num_senders; i = i + 1) begin
-                    if (!done_latched[conc_senders[i]] && app_frame_done[conc_senders[i]])
-                        done_latched[conc_senders[i]] = 1'b1;
-                end
-                for (i = 0; i < num_senders; i = i + 1) begin
-                    if (!done_latched[conc_senders[i]] && app_frame_accepted[conc_senders[i]]) begin
-                        app_frame_valid[conc_senders[i]] <= 1'b0;
-                        app_dst_id[conc_senders[i]] <= 8'd0;
-                        app_len16[conc_senders[i]] <= 16'd0;
+                    if (!accepted_latched[conc_senders[i]] &&
+                        app_frame_accepted[conc_senders[i]]) begin
+                        accepted_latched[conc_senders[i]] = 1'b1;
+                        app_frame_valid[conc_senders[i]] = 1'b0;
+                        app_dst_id[conc_senders[i]] = 8'd0;
+                        app_len16[conc_senders[i]] = 16'd0;
                     end
                 end
+
+                for (i = 0; i < num_senders; i = i + 1) begin
+                    if (!done_latched[conc_senders[i]] &&
+                        app_frame_done[conc_senders[i]]) begin
+                        done_latched[conc_senders[i]] = 1'b1;
+                    end
+                end
+            end
+
+            for (i = 0; i < num_senders; i = i + 1) begin
+                app_frame_valid[conc_senders[i]] = 1'b0;
+                app_dst_id[conc_senders[i]] = 8'd0;
+                app_len16[conc_senders[i]] = 16'd0;
             end
 
             @(posedge clk);
@@ -407,15 +438,22 @@ integer i_pipe;
     endtask
 
     // ---- check_scoreboard: match received frames against expected set ----
+    //   FIX: rx_matched is now a 2D array [node][ri] so each node has
+    //   independent matched flags.  The previous 1D rx_matched was shared
+    //   across nodes, causing false "UNEXPECTED" reports on earlier nodes
+    //   after later nodes overwrote it.
     task check_scoreboard;
         input integer case_num;
         integer node, ei, ri, k;
         integer total_exp, total_rx;
         integer match_cnt;
-        reg [MAX_EXP-1:0] rx_matched;
+        integer rx_matched [0:NUM_NODES-1][0:MAX_EXP-1];
         reg payload_ok;
         begin
-            rx_matched = 0;
+            for (node = 0; node < NUM_NODES; node = node + 1)
+                for (ri = 0; ri < MAX_EXP; ri = ri + 1)
+                    rx_matched[node][ri] = 0;
+
             total_exp = 0;
             total_rx = 0;
             for (node = 0; node < NUM_NODES; node = node + 1) begin
@@ -430,11 +468,11 @@ integer i_pipe;
             match_cnt = 0;
             for (node = 0; node < NUM_NODES; node = node + 1) begin
                 for (ri = 0; ri < case_rx_count[node]; ri = ri + 1)
-                    rx_matched[ri] = 1'b0;
+                    rx_matched[node][ri] = 0;
 
                 for (ei = 0; ei < exp_count[node]; ei = ei + 1) begin
                     for (ri = 0; ri < case_rx_count[node]; ri = ri + 1) begin
-                        if (!rx_matched[ri] &&
+                        if (!rx_matched[node][ri] &&
                             case_rx_src[node][ri] == exp_src[node][ei] &&
                             case_rx_dst[node][ri] == exp_fdst[node][ei] &&
                             case_rx_len[node][ri] == exp_len[node][ei] &&
@@ -452,7 +490,7 @@ integer i_pipe;
                             end
 
                             if (payload_ok) begin
-                                rx_matched[ri] = 1'b1;
+                                rx_matched[node][ri] = 1;
                                 exp_matched[node][ei] = 1;
                                 match_cnt = match_cnt + 1;
                             end
@@ -470,7 +508,7 @@ integer i_pipe;
                     end
                 end
                 for (ri = 0; ri < case_rx_count[node]; ri = ri + 1) begin
-                    if (!rx_matched[ri]) begin
+                    if (!rx_matched[node][ri]) begin
                         $display("FAIL Case %0d: Node %0d UNEXPECTED rx frame src=%0d fdst=%0d len=%0d base=%08h",
                                  case_num, node, case_rx_src[node][ri], case_rx_dst[node][ri],
                                  case_rx_len[node][ri], case_rx_payload[node][ri][0]);
@@ -491,7 +529,6 @@ integer i_pipe;
     //--------------------------------------------------------------------------
     // Main test sequence
     //--------------------------------------------------------------------------
-
 
     initial begin
         clk = 0;

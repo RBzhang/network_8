@@ -483,25 +483,45 @@ $finish called at time : 167095 ns
 | 3 | 四源同目的 | Node0,1,2,7 同时→Node4 | Node4 收 4 帧，src 各不同，payload 不混乱 |
 | 4 | 广播+单播混合 | Node2→广播(len=2) + Node0→3(len=4) + Node5→1(len=3) | 7 节点各收广播 1 次，单播目标正确收到 |
 
-#### 测试结果 (初次运行)
+#### Testbench Bug 修复
 
-**Vivado/XSim 行为仿真：Case 1 失败（0 帧接收）**
+初次运行时 Case 1 即失败（0 帧接收），根因是 testbench 中存在 5 个 bug，不涉及 RTL 源码：
+
+| # | Bug | 根因 | 修复 |
+|---|-----|------|------|
+| 1 | `case_active=0` 清零 scoreboard | `if (rst || !case_active) case_rx_count <= 0` 在 `check_scoreboard()` 之前 10 拍清零了所有已收帧 | `!case_active` 分支删除，清空只由 `clear_scoreboard()` 完成 |
+| 2 | `send_concurrent` 握手健壮性不足 | 缺少 `accepted_latched` 每 sender 独立锁存；`app_frame_accepted` 清除用 `<=` 与 `=` 混用 | 新增 `accepted_latched[7:0]` + `done_latched[7:0]`，每 sender 独立清除；while 后保险清理全部 sender |
+| 3 | `rx_matched` 1D 数组跨节点复用 | `reg [MAX_EXP-1:0] rx_matched` 在 8 节点循环中被后节点覆盖，前节点 unexpected check 误报 | 改为 `integer rx_matched [0:NUM_NODES-1][0:MAX_EXP-1]` 二维数组 |
+| 4 | payload 归属依赖 `case_rx_count-1` | 若未来 DUT 时序变化使 frame_valid 与 payload_valid 同拍，归属会错误 | 新增 `case_rx_cap_sel` 在 frame_valid 时保存归属索引，payload 直接引用 |
+| 5 | `clear_scoreboard` 未清 `case_rx_cap_sel` | 新增变量未注册到清除逻辑 | 添加 `case_rx_cap_sel[nd] = 0` |
+
+#### 测试结果 (修复后，2026-06-21, Vivado/XSim)
+
+**Vivado/XSim 行为仿真：ALL CONCURRENT TRAFFIC TESTS PASSED (4/4)**
 
 ```
-Case 1: 4 concurrent unicasts to distinct destinations
-  Scoreboard Case 1: 0/4 frames matched OK
-FAIL Case 1: Node 4 expected src=0 fdst=4 len=4 base=a1000000 NOT received
-FAIL Case 1: Node 5 expected src=1 fdst=5 len=3 base=a2000000 NOT received
-FAIL Case 1: Node 6 expected src=2 fdst=6 len=7 base=a3000000 NOT received
-FAIL Case 1: Node 7 expected src=3 fdst=7 len=2 base=a4000000 NOT received
-FAIL Case 1: matched 0/4 expected, received 0 total frames
-$fatal at 25195 ns
-```
+============================================================
+ 8-NODE CONCURRENT TRAFFIC TEST
+============================================================
+CASE 1: 4 concurrent unicasts to distinct destinations
+  Scoreboard Case 1: 4/4 frames matched OK
+CASE 1 PASSED
 
-**初步分析：** Case 1 中 4 个并发源节点均未成功发出任何帧（0 frames received）。可能原因：
-- `send_concurrent` 任务的并发 valid 握手时序与 `local_packet_generator` 的 `app_frame_ready` 条件存在竞态
-- `tx_enqueue_engine` 的 `network_congested` 在并发场景下压低 `app_frame_ready`，导致 `app_frame_accepted` 无法触发
-- 需要在 Vivado 中追踪 `app_frame_valid[0..3]`、`app_frame_ready[0..3]`、`app_frame_accepted[0..3]` 波形定位握手失败点
+CASE 2: 4 concurrent unicasts, reverse cross pattern
+  Scoreboard Case 2: 4/4 frames matched OK
+CASE 2 PASSED
+
+CASE 3: 4 sources -> single destination (Node4)
+  Scoreboard Case 3: 4/4 frames matched OK
+CASE 3 PASSED
+
+CASE 4: Mixed broadcast + 2 unicasts concurrently
+  Scoreboard Case 4: 9/9 frames matched OK
+CASE 4 PASSED
+
+ ALL CONCURRENT TRAFFIC TESTS PASSED
+$finish called at time : 913895 ns
+```
 
 #### 运行仿真
 
