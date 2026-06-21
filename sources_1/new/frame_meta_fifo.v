@@ -5,8 +5,6 @@
 //   din/dout format: {enqueue_time[TIME_W-1:0], frame_words[15:0]}.
 //   USE_IP=1: Vivado fifo_generator_meta (48-bit, depth 512, FWFT)
 //   USE_IP=0: custom sync_fifo (iverilog simulation)
-//   NOTE: fifo_generator_meta has NO data_count port.
-//         A simple behavioral counter is added alongside the IP.
 //------------------------------------------------------------------------------
 module frame_meta_fifo #(
     parameter DEPTH = 8192,
@@ -30,10 +28,8 @@ module frame_meta_fifo #(
         if (USE_IP) begin : g_ip
             // Vivado IP: fifo_generator_meta
             //   Common Clock Block RAM, FWFT, 48-bit x 512
-            //   srst (synchronous reset)
-            //   No data_count — counter added below
-            wire ip_full;
-            wire ip_empty;
+            //   srst (synchronous reset), data_count [9:0]
+            wire [9:0] ip_data_count;
 
             fifo_generator_meta u_fifo (
                 .clk(clk),
@@ -42,27 +38,13 @@ module frame_meta_fifo #(
                 .wr_en(wr_en),
                 .rd_en(rd_en),
                 .dout(dout),
-                .empty(ip_empty),
-                .full(ip_full)
+                .empty(empty),
+                .full(full),
+                .data_count(ip_data_count)
             );
 
-            assign empty = ip_empty;
-            assign full  = ip_full;
-
-            // Behavioral data_count counter to compensate missing IP port.
-            reg [COUNT_W-1:0] cnt;
-            always @(posedge clk) begin
-                if (rst) begin
-                    cnt <= {COUNT_W{1'b0}};
-                end else begin
-                    case ({wr_en && !ip_full, rd_en && !ip_empty})
-                        2'b10: cnt <= cnt + 1'b1;
-                        2'b01: cnt <= cnt - 1'b1;
-                        default: ;
-                    endcase
-                end
-            end
-            assign data_count = cnt;
+            // Pad 10-bit IP data_count to COUNT_W (14-bit) for interface compatibility
+            assign data_count = {{COUNT_W-10{1'b0}}, ip_data_count};
         end else begin : g_behav
             sync_fifo #(
                 .DEPTH(DEPTH),
