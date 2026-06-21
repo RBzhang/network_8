@@ -55,6 +55,13 @@ module node_core #(
     output wire        app_len_error,
     output wire        rx_overflow
 );
+`ifdef IVERILOG_SIM
+    localparam USE_TX_FIFO_IP = 0;
+    localparam USE_META_FIFO_IP = 0;
+`else
+    localparam USE_TX_FIFO_IP = 1;
+    localparam USE_META_FIFO_IP = 1;
+`endif
     localparam PORT_W = (NUM_PORTS <= 1) ? 1 : $clog2(NUM_PORTS);
     localparam FIFO_COUNT_W = (FIFO_DEPTH <= 1) ? 1 : $clog2(FIFO_DEPTH);
     localparam TX_FRAME_QUEUE_COUNT_W = $clog2(FIFO_DEPTH + 1);
@@ -447,7 +454,7 @@ module node_core #(
             tx_frame_fifo #(
                 .DEPTH(FIFO_DEPTH),
                 .WIDTH(34),
-                .USE_IP(`ifdef IVERILOG_SIM 0 `else 1 `endif),
+                .USE_IP(USE_TX_FIFO_IP),
                 .COUNT_W(TX_FRAME_QUEUE_COUNT_W)
             ) u_tx_frame_fifo (
                 .clk(clk),
@@ -464,7 +471,7 @@ module node_core #(
             frame_meta_fifo #(
                 .DEPTH(FIFO_DEPTH),
                 .TIME_W(TX_QUEUE_TIME_W),
-                .USE_IP(`ifdef IVERILOG_SIM 0 `else 1 `endif),
+                .USE_IP(USE_META_FIFO_IP),
                 .COUNT_W(TX_FRAME_QUEUE_COUNT_W)
             ) u_frame_meta_fifo (
                 .clk(clk),
