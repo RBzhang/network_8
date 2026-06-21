@@ -495,6 +495,20 @@ Vivado 行为级仿真 `[USF-XSim-62] elaborate step failed` 的根因是 `fifo_
 - **影响范围**：`sim/ip_stubs.v`、`gtwizard_0_ex.xpr`。
 - **iverilog 兼容**：iverilog 编译命令已包含 `sim/ip_stubs.v`，自动获得新 stub。
 
+## rx_overflow 诊断逻辑修复
+
+Vivado 行为级仿真中所有 5 项测试通过，但末尾出现全节点 `rx_overflow asserted` warning。旧逻辑的根因与修复如下：
+
+- **旧逻辑** (`node_core.v`)：在 `clk` 域直接采样 `|rx_full`（跨域不严谨），且仅凭 `rx_full=1` 置 sticky，不检查 `valid_in`；`rx_full=1` 不代表输入 word 被丢弃（FIFO 满后下一个 `valid_in` 才触发丢弃）。
+- **新逻辑** (`port_cdc.v` + `node_core.v`)：
+  - `port_cdc.v` 每个端口在 `rx_clk[p]` 域检测 `valid_in[p] && id_locked_rx_sync && rx_full[p]`，置 sticky `rx_overflow_rx`，表示有输入 word 因 FIFO 满被丢弃。
+  - 通过 2-FF CDC 同步器将 `rx_overflow_rx` 同步到 `clk` 域 → `rx_overflow_ports[p]`。
+  - `node_core.v` 将 `rx_overflow_ports` OR 为标量 `rx_overflow = |rx_overflow_ports`，port_cdc 内已是 sticky，无需 node_core 再 sticky。
+- **影响范围**：`port_cdc.v`（新增 `rx_overflow` 输出端口 + rx_clk 域检测 + CDC 同步器）、`node_core.v`（添加 `rx_overflow_ports` 连线，删除旧的 `rx_overflow_r` 逻辑）。
+- **未修改**：主数据通路（`sync_fifo`, `tx_frame_fifo`, `frame_meta_fifo`, `port_tx_queue_sender`, `tx_enqueue_engine`, `frame_rx`, `forward_engine`）。
+- **iverilog 回归**：stub 模式 ALL TESTS PASSED，无 `rx_overflow` warning。
+- **Vivado 预期**：用户需本地重新运行 Vivado XSim，预期 ALL TESTS PASSED 且不再出现全节点 rx_overflow warning。
+
 ## 发布脚本
 
 仓库新增了一个 PowerShell 发布脚本：[`scripts/publish_to_main.ps1`](scripts/publish_to_main.ps1)。

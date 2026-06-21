@@ -27,7 +27,8 @@ module port_cdc #(
     output wire [NUM_PORTS*32-1:0] tx_dout_flat,
     output wire [NUM_PORTS-1:0] tx_empty,
     output wire [NUM_PORTS*32-1:0] out_flat,
-    output wire [NUM_PORTS-1:0] valid_out
+    output wire [NUM_PORTS-1:0] valid_out,
+    output wire [NUM_PORTS-1:0] rx_overflow
 );
     genvar p;
     generate
@@ -43,6 +44,9 @@ module port_cdc #(
             reg tx_rd_en_r;
             reg tx_pop_pending;
             wire [FIFO_COUNT_W-1:0] unused_rx_wr_data_count;
+            reg rx_overflow_rx;
+            reg rx_overflow_meta;
+            reg rx_overflow_sync;
 
             always @(posedge rx_clk[p]) begin
                 id_locked_rx_meta <= id_locked;
@@ -51,9 +55,26 @@ module port_cdc #(
                 rst_rx_sync <= rst_rx_meta;
             end
 
+            always @(posedge rx_clk[p]) begin
+                if (rst_rx_sync || !id_locked_rx_sync)
+                    rx_overflow_rx <= 1'b0;
+                else if (valid_in[p] && id_locked_rx_sync && rx_full[p])
+                    rx_overflow_rx <= 1'b1;
+            end
+
             always @(posedge tx_clk[p]) begin
                 rst_tx_meta <= rst;
                 rst_tx_sync <= rst_tx_meta;
+            end
+
+            always @(posedge clk) begin
+                if (rst || !id_locked) begin
+                    rx_overflow_meta <= 1'b0;
+                    rx_overflow_sync <= 1'b0;
+                end else begin
+                    rx_overflow_meta <= rx_overflow_rx;
+                    rx_overflow_sync <= rx_overflow_meta;
+                end
             end
 
             async_fifo #(.DEPTH(FIFO_DEPTH)) u_rx_fifo (
@@ -110,6 +131,7 @@ module port_cdc #(
 
             assign out_flat[p*32 +: 32] = out_r;
             assign valid_out[p] = valid_out_r;
+            assign rx_overflow[p] = rx_overflow_sync;
         end
     endgenerate
 endmodule

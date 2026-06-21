@@ -83,6 +83,7 @@ module node_core #(
     wire [NUM_PORTS-1:0] rx_empty;
     wire [NUM_PORTS-1:0] rx_full;
     wire [NUM_PORTS-1:0] rx_rd_en;
+    wire [NUM_PORTS-1:0] rx_overflow_ports;
     wire [31:0]          rx_dout [0:NUM_PORTS-1];
     wire [NUM_PORTS*32-1:0] rx_dout_flat;
 
@@ -126,20 +127,11 @@ module node_core #(
         .tx_dout_flat(tx_dout_flat),
         .tx_empty(tx_empty),
         .out_flat(out_flat),
-        .valid_out(valid_out)
+        .valid_out(valid_out),
+        .rx_overflow(rx_overflow_ports)
     );
 
-    // Sticky RX-overflow flag: latches high the first time any port's RX FIFO
-    // fills, cleared only by the main reset. Upper layers can poll this to
-    // detect that at least one incoming frame was silently dropped.
-    reg rx_overflow_r;
-    always @(posedge clk) begin
-        if (rst || !id_locked)
-            rx_overflow_r <= 1'b0;
-        else if (|rx_full)
-            rx_overflow_r <= 1'b1;
-    end
-    assign rx_overflow = rx_overflow_r;
+    assign rx_overflow = |rx_overflow_ports;
 
     reg [TX_QUEUE_TIME_W-1:0] tx_queue_time;
     always @(posedge clk) begin
