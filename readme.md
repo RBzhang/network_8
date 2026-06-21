@@ -461,6 +461,55 @@ $finish called at time : 167095 ns
 2. 设置顶层模块为 `tb_8node_unicast_matrix`
 3. Run Behavioral Simulation
 
+### 并发流量测试 (2026-06-21, Vivado/XSim)
+
+新增独立 testbench `sim_1/new/tb_8node_concurrent_traffic.v`，验证多节点同时发包时 `tx_enqueue_engine`、`rx_dispatcher`、`forward_engine`、去重表和每端口 TX 队列不会互相干扰。使用 scoreboard 机制匹配预期帧与接收帧，避免到达顺序不确定导致误判。
+
+#### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_concurrent_traffic.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 仿真工具 | Vivado XSim |
+| 测试日期 | 2026-06-21 |
+
+#### 测试用例
+
+| # | Case | 并发模式 | 验证点 |
+|---|------|---------|--------|
+| 1 | 四个源→四个不同目的 | Node0→4, 1→5, 2→6, 3→7 同时 | 各目标收 1 帧，payload 正确 |
+| 2 | 反向交叉 | Node7→3, 6→2, 5→1, 4→0 同时 | 反方向交叉通信正常 |
+| 3 | 四源同目的 | Node0,1,2,7 同时→Node4 | Node4 收 4 帧，src 各不同，payload 不混乱 |
+| 4 | 广播+单播混合 | Node2→广播(len=2) + Node0→3(len=4) + Node5→1(len=3) | 7 节点各收广播 1 次，单播目标正确收到 |
+
+#### 测试结果 (初次运行)
+
+**Vivado/XSim 行为仿真：Case 1 失败（0 帧接收）**
+
+```
+Case 1: 4 concurrent unicasts to distinct destinations
+  Scoreboard Case 1: 0/4 frames matched OK
+FAIL Case 1: Node 4 expected src=0 fdst=4 len=4 base=a1000000 NOT received
+FAIL Case 1: Node 5 expected src=1 fdst=5 len=3 base=a2000000 NOT received
+FAIL Case 1: Node 6 expected src=2 fdst=6 len=7 base=a3000000 NOT received
+FAIL Case 1: Node 7 expected src=3 fdst=7 len=2 base=a4000000 NOT received
+FAIL Case 1: matched 0/4 expected, received 0 total frames
+$fatal at 25195 ns
+```
+
+**初步分析：** Case 1 中 4 个并发源节点均未成功发出任何帧（0 frames received）。可能原因：
+- `send_concurrent` 任务的并发 valid 握手时序与 `local_packet_generator` 的 `app_frame_ready` 条件存在竞态
+- `tx_enqueue_engine` 的 `network_congested` 在并发场景下压低 `app_frame_ready`，导致 `app_frame_accepted` 无法触发
+- 需要在 Vivado 中追踪 `app_frame_valid[0..3]`、`app_frame_ready[0..3]`、`app_frame_accepted[0..3]` 波形定位握手失败点
+
+#### 运行仿真
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_concurrent_traffic.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_concurrent_traffic`
+3. Run Behavioral Simulation
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
