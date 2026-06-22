@@ -7,15 +7,27 @@
 // main clk in frequency and/or phase.  Three cases are exercised:
 //
 //   Case 1  – same 100 MHz, zero-phase baseline → phased (1/2/3 ns offset)
-//   Case 2  – slightly different periods (9.8, 10.1, 10.3, 9.7 ns)
-//   Case 3  – per-node phase variations (mixed across nodes)
+//   Case 2  – different frequencies per link; receiver rx_clk derived from
+//             upstream tx_clk (source-synchronous / recovered-clock model)
+//   Case 3  – per-node independent tx ports; rx derived from upstream tx
 //
-// NOTE (CDC simplification):
-//   The ring link uses combinational (wire) connections.  In real hardware the
-//   physical link is passive; the actual CDC occurs inside port_cdc (async
-//   FIFOs on RX/TX paths), which is what this testbench exercises.  No
-//   extra pipeline register is inserted because a main-clk register would
-//   create an additional CDC boundary that is not part of the DUT.
+// LINK CLOCK MODEL (source-synchronous / CDR):
+//   This testbench models a recovered-clock (CDR) physical layer by
+//   deriving each receiver's rx_clk from the upstream transmitter's tx_clk.
+//
+//     rx_clk1[j] = tx_clk0[(j+NUM_NODES-1)%NUM_NODES]   (CW: out0 → in1)
+//     rx_clk0[j] = tx_clk1[(j+1)%NUM_NODES]              (CCW: out1 → in0)
+//
+//   This ensures valid_in/data_in are synchronous to their rx_clk, matching
+//   real SerDes/CDR behaviour where the receiver clock is recovered from the
+//   incoming data stream.  port_cdc still handles rx_clk↔main-clk and
+//   main-clk↔tx_clk CDC across independent clock domains.
+//
+//   The direct-wire link (valid_out/data_out connected by combinational
+//   wires to valid_in/data_in) is correct ONLY when the receiver's rx_clk
+//   matches the transmitter's tx_clk.  A combinational parallel bus cannot
+//   be reliably sampled by an unrelated asynchronous clock — this is a
+//   testbench link-model constraint, not an async FIFO limitation.
 //------------------------------------------------------------------------------
 module tb_8node_async_clock;
 
@@ -438,25 +450,53 @@ module tb_8node_async_clock;
         end
     endtask
 
-    task config_clocks_diff_freq;
-        integer i;
+    //--------------------------------------------------------------------------
+    // derive_rx_clocks_from_tx_links:
+    //   Sets each receiver's rx_clk equal to the upstream transmitter's tx_clk.
+    //   This models source-synchronous / CDR / recovered-clock behaviour.
+    //
+    //     rx_clk1[j] = tx_clk0[(j+NUM_NODES-1)%NUM_NODES]  (CW in1 ← out0)
+    //     rx_clk0[j] = tx_clk1[(j+1)%NUM_NODES]              (CCW in0 ← out1)
+    //
+    //   Call this after configuring tx0_sel/tx1_sel.
+    //--------------------------------------------------------------------------
+    task derive_rx_clocks_from_tx_links;
+        integer j;
         begin
-            for (i = 0; i < NUM_NODES; i = i + 1) begin
-                rx0_sel[i] = 4; rx1_sel[i] = 5;
-                tx0_sel[i] = 6; tx1_sel[i] = 7;
+            for (j = 0; j < NUM_NODES; j = j + 1) begin
+                rx1_sel[j] = tx0_sel[(j + NUM_NODES - 1) % NUM_NODES];
+                rx0_sel[j] = tx1_sel[(j + 1) % NUM_NODES];
             end
         end
     endtask
 
+    //---- config_clocks_diff_freq --------------------------------------------
+    //   Different frequencies per port: tx uses src4-src7 (102/99/97/103 MHz).
+    //   Receiver rx_clks are derived from upstream tx_clks (source-sync model).
+    task config_clocks_diff_freq;
+        integer i;
+        begin
+            // TX clocks: each port gets a different frequency source
+            for (i = 0; i < NUM_NODES; i = i + 1) begin
+                tx0_sel[i] = 4 + (i % 4);                 // 4,5,6,7 cyclic
+                tx1_sel[i] = 4 + ((i + 2) % 4);           // 6,7,4,5 cyclic
+            end
+            // RX clocks: derived from upstream TX (source-sync model)
+            derive_rx_clocks_from_tx_links();
+        end
+    endtask
+
+    //---- config_clocks_per_node ----------------------------------------------
+    //   Different phase per node/port (src0-src3, all 100 MHz).
+    //   Receiver rx_clks are derived from upstream tx_clks (source-sync model).
     task config_clocks_per_node;
         integer i;
         begin
             for (i = 0; i < NUM_NODES; i = i + 1) begin
-                rx0_sel[i] = i % 4;
-                rx1_sel[i] = (i + 1) % 4;
-                tx0_sel[i] = (i + 2) % 4;
-                tx1_sel[i] = (i + 3) % 4;
+                tx0_sel[i] = i % 4;
+                tx1_sel[i] = (i + 2) % 4;
             end
+            derive_rx_clocks_from_tx_links();
         end
     endtask
 
@@ -569,10 +609,19 @@ module tb_8node_async_clock;
 
         //======================================================================
         $display("============================================================");
-        $display(" CASE 2: Different frequencies (9.8 / 10.1 / 10.3 / 9.7 ns)");
+        $display(" CASE 2: Different frequencies, source-sync recovered clock");
+        $display("         (tx=97/99/102/103 MHz; rx derived from upstream tx)");
         $display("============================================================");
         config_clocks_diff_freq();
         wait_network_idle(20000);
+
+        // Verify rx clocks match upstream tx (source-sync model)
+        $display("  Link clock pairs (rx ← upstream tx):");
+        for (n = 0; n < NUM_NODES; n = n + 1) begin
+            $display("    N%0d.in1(rx1=%0d) ← N%0d.out0(tx0=%0d)    N%0d.in0(rx0=%0d) ← N%0d.out1(tx1=%0d)",
+                     n, rx1_sel[n], (n+NUM_NODES-1)%NUM_NODES, tx0_sel[(n+NUM_NODES-1)%NUM_NODES],
+                     n, rx0_sel[n], (n+1)%NUM_NODES, tx1_sel[(n+1)%NUM_NODES]);
+        end
 
         // 2a: Node0→Node4
         for (n = 0; n < NUM_NODES; n = n + 1)
@@ -607,64 +656,39 @@ module tb_8node_async_clock;
             end
         end
         $display("  OK: Broadcast (diff freq) received by all others");
-        // Ensure broadcast fully propagated before max-payload test
         wait_network_idle(TIMEOUT_CYCLES);
         repeat (5000) @(posedge clk);
 
-        // 2d: Node6→Node7 len=4 (adjacent pair, diff-freq CDC stress)
-        // NOTE: With combinational wire link and iverilog async-FIFO models,
-        // the adjacent pair Node6→Node7 (tx_clk 10.3ns → rx_clk 10.1ns) may
-        // not deliver reliably.  The multi-hop paths (Node0→4, Node5→1) and
-        // broadcast work correctly.  Use Vivado/XSim for definitive CDC
-        // validation of this path.
-        $display("  Testing Node6->Node7 (adjacent, diff freq)...");
+        // 2d: Node6→Node7 len=4 (adjacent pair, strict PASS under source-sync)
+        // With rx_clk derived from upstream tx_clk, valid_in/data_in are
+        // synchronous to the receiver rx_clk.  This is a strict CDC test
+        // of port_cdc (rx_clk↔main-clk↔tx_clk).
+        $display("  Testing Node6->Node7 (adjacent, diff freq, source-sync rx)...");
         for (n = 0; n < NUM_NODES; n = n + 1)
             expect_count[n] = rx_frame_count[n];
         expect_count[7] = expect_count[7] + 1;
         send_frame(6, 8'd7, 4, 32'hA230_0000);
-        begin : b_2d
-            c_tmp = 0; ok_tmp = 0;
-            while (c_tmp < TIMEOUT_CYCLES * 2 && !ok_tmp) begin
-                @(posedge clk);
-                c_tmp = c_tmp + 1;
-                if (rx_frame_count[7] >= expect_count[7]) ok_tmp = 1;
-            end
-            if (ok_tmp) begin
-                repeat (2000) @(posedge clk);
-                check_frame(7, 8'd6, 8'd7, 4, 32'hA230_0000, expect_count[7]);
-                $display("  OK: Node6->Node7 delivered with diff freq");
-            end else begin
-                $display("  INFO: Node6->Node7 not delivered with diff freq (CDC async-FIFO limitation under large clock skew)");
-            end
-        end
+        wait_for_rx_frames(7, expect_count[7], TIMEOUT_CYCLES * 2);
+        repeat (2000) @(posedge clk);
+        check_frame(7, 8'd6, 8'd7, 4, 32'hA230_0000, expect_count[7]);
+        $display("  OK: Node6->Node7 delivered with diff freq (source-sync rx)");
 
-        // 2e: Node6→Node7 len=256 (max payload, same caveat)
+        // 2e: Node6→Node7 len=256 (max payload, strict PASS)
         $display("  Testing Node6->Node7 max payload (len=256)...");
         for (n = 0; n < NUM_NODES; n = n + 1)
             expect_count[n] = rx_frame_count[n];
         expect_count[7] = expect_count[7] + 1;
         send_frame(6, 8'd7, MAX_PAYLOAD, 32'hA240_0000);
-        begin : b_2e
-            c_tmp = 0; ok_tmp = 0;
-            while (c_tmp < TIMEOUT_CYCLES * 4 && !ok_tmp) begin
-                @(posedge clk);
-                c_tmp = c_tmp + 1;
-                if (rx_frame_count[7] >= expect_count[7]) ok_tmp = 1;
-            end
-            if (ok_tmp) begin
-                repeat (5000) @(posedge clk);
-                check_frame(7, 8'd6, 8'd7, MAX_PAYLOAD, 32'hA240_0000, expect_count[7]);
-                $display("  OK: max-payload delivered with diff freq");
-            end else begin
-                $display("  INFO: max-payload (len=256) not delivered with diff freq (CDC async-FIFO limitation under large clock skew)");
-            end
-        end
+        wait_for_rx_frames(7, expect_count[7], TIMEOUT_CYCLES * 4);
+        repeat (5000) @(posedge clk);
+        check_frame(7, 8'd6, 8'd7, MAX_PAYLOAD, 32'hA240_0000, expect_count[7]);
+        $display("  OK: max-payload delivered with diff freq (source-sync rx)");
 
-        $display("  Case 2 PASSED (different frequencies)");
+        $display("  Case 2 PASSED (different frequencies, source-sync recovered clock)");
 
         //======================================================================
         $display("============================================================");
-        $display(" CASE 3: Per-node phase variations");
+        $display(" CASE 3: Per-node phase variations (source-sync rx)");
         $display("============================================================");
         config_clocks_per_node();
         wait_network_idle(20000);
@@ -712,7 +736,7 @@ module tb_8node_async_clock;
         end
         $display("  OK: Broadcast (per-node phase) received by all others");
 
-        $display("  Case 3 PASSED (per-node phase variations)");
+        $display("  Case 3 PASSED (per-node phase, source-sync recovered clock)");
 
         //======================================================================
         // Final health checks
