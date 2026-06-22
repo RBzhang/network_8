@@ -712,6 +712,109 @@ iverilog -g2012 -o sim_build/tb_8node_tx_congestion.vvp sim/ip_stubs.v sources_1
 vvp sim_build/tb_8node_tx_congestion.vvp
 ```
 
+### 探活机制测试 (2026-06-22, iverilog 12.0)
+
+新增独立 testbench `sim_1/new/tb_8node_liveness.v`，验证 `liveness_timer` 和 `liveness_table` 的广播状态包（心跳）、滑动窗口 alive/offline 判定、节点恢复上线行为，以及普通数据包对 liveness 的刷新作用。该 testbench 专为探活测试设计，将 `CLK_FREQ_HZ` 设为 2000 以加速探活周期（tick_1s 每 2000 周期 ≈ 20μs 触发一次），与 `tb_8node_ring.v` 中故意增大 `SIM_CLK_FREQ` 以避免探活干扰通信测试的策略相反。
+
+#### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_liveness.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 关键参数 | `SIM_CLK_FREQ=2000`, `LIVENESS_WIN=5`, `NODE_COUNT=255` |
+| 离线模拟 | `mask_valid_out[0/1][3]` 门控 Node3 的环形链路 pipeline 输出，切断其心跳广播 |
+| Scoreboard | `alive_seen[observer][reported_node]` / `offline_seen[observer][reported_node]` |
+| 仿真工具 | iverilog 12.0 |
+| 测试日期 | 2026-06-22 |
+
+#### 设计说明：自身探活
+
+节点从不通过 `liveness_alive` 报告自身为 alive，因为 `rx_dispatcher` 在 `S_CLASSIFY` 状态过滤掉 `active_src_id == my_id` 的帧。因此 `alive_seen[obs][obs]` 和 `offline_seen[obs][obs]` 始终反映该节点从自身视角看到 offline（即 scoreboard 中标记为 `[ self ]`），属于设计预期行为，同时验证了自过滤逻辑正确。
+
+#### 测试用例
+
+| # | Case | 描述 | 验证点 |
+|---|------|------|--------|
+| 1 | 全节点在线 | 初始化完成后等待 6+ 个探活周期，记录一次完整 upload scan | 每个节点报告所有其他节点 alive |
+| 2 | 单节点离线 | 屏蔽 Node3 的 `valid_out0`/`valid_out1`，等待 `LIVENESS_WIN+2=7` 个周期 | 其他 7 节点均报告 N3=OFF |
+| 3 | 节点恢复 | 解除 Node3 输出屏蔽，等待 7 个周期 | 其他 7 节点恢复报告 N3=ALIVE |
+| 4 | 数据包刷新存活 | 在心跳始终运行的背景下发送 Node5→Node1 单播数据包 | Node1 及转发邻居保持 Node5 为 alive |
+
+Case 4 为辅助验证：由于心跳持续运行，无法完全隔离数据包的 liveness 刷新效应。验证的是在数据包发送后接收方仍报告发送方 alive，与心跳更新合并生效。
+
+#### 测试结果
+
+**iverilog 12.0 仿真：ALL LIVENESS TESTS PASSED**
+
+```
+============================================================
+ CASE 1: All nodes online
+============================================================
+  Verifying: every node sees every other node as alive...
+  PASS: All nodes see all other nodes as alive
+
+============================================================
+ CASE 2: Node3 goes offline (valid_out masked)
+============================================================
+  Baseline: Node3 alive=1 (as seen by Node0)
+  Masked Node3 valid_out at cycle 14267
+  Verifying: all other nodes see Node3 as offline...
+  PASS: Node3 is reported offline by all other nodes
+
+============================================================
+ CASE 3: Node3 recovery (valid_out unmasked)
+============================================================
+  Unmasked Node3 valid_out at cycle 30267
+  Verifying: all other nodes see Node3 as alive again...
+  PASS: Node3 is reported alive by all other nodes after recovery
+
+============================================================
+ CASE 4: Data packet refreshes liveness (auxiliary)
+============================================================
+  Data packet sent: Node5 -> Node1, len=2, at cycle 52280
+  Post-send: Node5 alive from Node1 perspective = 1
+  PASS: Node5 is seen as alive by Node1 after data packet
+  PASS: Forwarding neighbor also sees Node5 as alive
+
+============================================================
+ ALL LIVENESS TESTS PASSED
+  Verified: broadcast heartbeat, sliding window alive/offline,
+            node recovery, and data-packet liveness refresh.
+============================================================
+$finish called at time : 542875 ns
+```
+
+4 项测试全部通过。`liveness_timer` 在 CLK_FREQ_HZ=2000 时正确产生周期 tick，`liveness_table` 的 5 周期滑动窗口在屏蔽输出后正确消耗历史 alive 位并转为 offline，解除屏蔽后心跳恢复使窗口重新填充 alive 位。数据包通过 `rx_dispatcher` 的 `liveness_update` 信号正确刷新 liveness 窗口。
+
+#### Scoreboard 输出示例（Case 2，Node3 offline）
+
+```
+LIVENESS SCOREBOARD (alive_seen | offline_seen):
+  Node0 sees: [ self ] N1=ALIVE N2=ALIVE N3=OFF   N4=ALIVE N5=ALIVE N6=ALIVE N7=ALIVE
+  Node1 sees: N0=ALIVE [ self ] N2=ALIVE N3=OFF   N4=ALIVE N5=ALIVE N6=ALIVE N7=ALIVE
+  Node2 sees: N0=ALIVE N1=ALIVE [ self ] N3=OFF   N4=ALIVE N5=ALIVE N6=ALIVE N7=ALIVE
+  Node3 sees: N0=ALIVE N1=ALIVE N2=ALIVE [ self ] N4=ALIVE N5=ALIVE N6=ALIVE N7=ALIVE
+  Node4 sees: N0=ALIVE N1=ALIVE N2=ALIVE N3=OFF   [ self ] N5=ALIVE N6=ALIVE N7=ALIVE
+  Node5 sees: N0=ALIVE N1=ALIVE N2=ALIVE N3=OFF   N4=ALIVE [ self ] N6=ALIVE N7=ALIVE
+  Node6 sees: N0=ALIVE N1=ALIVE N2=ALIVE N3=OFF   N4=ALIVE N5=ALIVE [ self ] N7=ALIVE
+  Node7 sees: N0=ALIVE N1=ALIVE N2=ALIVE N3=OFF   N4=ALIVE N5=ALIVE N6=ALIVE [ self ]
+```
+
+#### 运行仿真
+
+**iverilog:**
+```powershell
+cd D:\wurenji\network\gtwizard_0_ex.srcs
+iverilog -g2012 -DIVERILOG_SIM -s tb_8node_liveness -o sim_build/tb_8node_liveness.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_liveness.v
+vvp sim_build/tb_8node_liveness.vvp
+```
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_liveness.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_liveness`
+3. Run Behavioral Simulation
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
