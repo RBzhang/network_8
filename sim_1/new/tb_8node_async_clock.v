@@ -634,7 +634,7 @@ module tb_8node_async_clock;
                 check_frame(7, 8'd6, 8'd7, 4, 32'hA230_0000, expect_count[7]);
                 $display("  OK: Node6->Node7 delivered with diff freq");
             end else begin
-                $display("  INFO: Node6->Node7 not delivered with diff freq (known iverilog limitation)");
+                $fatal(1, "  FAIL: Node6->Node7 not delivered with diff freq");
             end
         end
 
@@ -656,7 +656,7 @@ module tb_8node_async_clock;
                 check_frame(7, 8'd6, 8'd7, MAX_PAYLOAD, 32'hA240_0000, expect_count[7]);
                 $display("  OK: max-payload delivered with diff freq");
             end else begin
-                $display("  INFO: max-payload (len=256) not delivered with diff freq (known iverilog limitation)");
+                $fatal(1, "  FAIL: max-payload (len=256) not delivered with diff freq");
             end
         end
 

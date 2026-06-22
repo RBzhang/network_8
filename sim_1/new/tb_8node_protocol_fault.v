@@ -351,7 +351,7 @@ module tb_8node_protocol_fault;
                 cycles = cycles + 1;
             end
             if (cycles >= timeout_cycles && received_frame_count[1] < target_count)
-                $display("  TIMEOUT: Node1 expected %0d frames, got %0d after %0d cycles",
+                $fatal(1, "  TIMEOUT: Node1 expected %0d frames, got %0d after %0d cycles",
                          target_count, received_frame_count[1], cycles);
         end
     endtask
@@ -370,7 +370,7 @@ module tb_8node_protocol_fault;
                 cycles = cycles + 1;
             end
             if (cycles >= timeout_cycles && rx_wr_idx < expected_len)
-                $display("  TIMEOUT: Node1 payload incomplete: got %0d/%0d words after %0d cycles",
+                $fatal(1, "  TIMEOUT: Node1 payload incomplete: got %0d/%0d words after %0d cycles",
                          rx_wr_idx, expected_len, cycles);
         end
     endtask
@@ -463,7 +463,7 @@ module tb_8node_protocol_fault;
         wait_quiet(2000);
 
         if (received_frame_count[1] != base_count)
-            $display("  FAIL: Node1 frame count changed from %0d to %0d (expected no change)",
+            $fatal(1, "  FAIL: Node1 frame count changed from %0d to %0d (expected no change)",
                      base_count, received_frame_count[1]);
         else
             $display("  PASS: Node1 correctly ignored CRC error frame");
@@ -504,13 +504,13 @@ module tb_8node_protocol_fault;
                 if (rx_payload_buf[0] == 32'hBBBB_0101 && rx_payload_buf[1] == 32'hBBBB_0202)
                     $display("  PASS: len overflow rejected, recovery frame received correctly");
                 else
-                    $display("  FAIL: recovery frame payload mismatch (got %08h %08h)",
+                    $fatal(1, "  FAIL: recovery frame payload mismatch (got %08h %08h)",
                              rx_payload_buf[0], rx_payload_buf[1]);
             end else
-                $display("  FAIL: recovery frame header mismatch (src=%0d dst=%0d len=%0d)",
+                $fatal(1, "  FAIL: recovery frame header mismatch (src=%0d dst=%0d len=%0d)",
                          last_rx_src_1, last_rx_dst_1, last_rx_len_1);
         end else
-            $display("  FAIL: recovery frame not received (count=%0d, expected=%0d)",
+            $fatal(1, "  FAIL: recovery frame not received (count=%0d, expected=%0d)",
                      received_frame_count[1], base_count + 1);
 
         //======================================================================
@@ -538,12 +538,12 @@ module tb_8node_protocol_fault;
                 if (rx_payload_buf[0] == SYNC_WORD && rx_payload_buf[1] == 32'hCCCC_1111)
                     $display("  PASS: SYNC_WORD in payload handled correctly, no false re-sync");
                 else
-                    $display("  FAIL: payload mismatch (expected SYNC_WORD then CCCC_1111, got %08h %08h)",
+                    $fatal(1, "  FAIL: payload mismatch (expected SYNC_WORD then CCCC_1111, got %08h %08h)",
                              rx_payload_buf[0], rx_payload_buf[1]);
             end else
-                $display("  FAIL: frame header mismatch");
+                $fatal(1, "  FAIL: frame header mismatch");
         end else
-            $display("  FAIL: frame not received (count=%0d)", received_frame_count[1]);
+            $fatal(1, "  FAIL: frame not received (count=%0d)", received_frame_count[1]);
 
         //======================================================================
         // CASE 4: garbage preamble before SYNC
@@ -584,12 +584,12 @@ module tb_8node_protocol_fault;
                 if (rx_payload_buf[0] == 32'hDDDD_0101 && rx_payload_buf[1] == 32'hDDDD_0202)
                     $display("  PASS: frame_rx re-synchronized after garbage preamble");
                 else
-                    $display("  FAIL: payload mismatch (got %08h %08h)",
+                    $fatal(1, "  FAIL: payload mismatch (got %08h %08h)",
                              rx_payload_buf[0], rx_payload_buf[1]);
             end else
-                $display("  FAIL: frame header mismatch");
+                $fatal(1, "  FAIL: frame header mismatch");
         end else
-            $display("  FAIL: frame not received after garbage (count=%0d)", received_frame_count[1]);
+            $fatal(1, "  FAIL: frame not received after garbage (count=%0d)", received_frame_count[1]);
 
         //======================================================================
         // CASE 5: half-frame abort + recovery
@@ -619,7 +619,7 @@ module tb_8node_protocol_fault;
 
         // Verify no app_rx from the aborted frame
         if (received_frame_count[1] != base_count)
-            $display("  FAIL: half-frame unexpectedly produced app_rx (count=%0d, base=%0d)",
+            $fatal(1, "  FAIL: half-frame unexpectedly produced app_rx (count=%0d, base=%0d)",
                      received_frame_count[1], base_count);
         else
             $display("  PASS: half-frame did not produce app_rx");
@@ -641,12 +641,12 @@ module tb_8node_protocol_fault;
                 if (rx_payload_buf[0] == 32'hFFFF_0101 && rx_payload_buf[1] == 32'hFFFF_0202)
                     $display("  PASS: system recovered and received valid frame after half-frame abort");
                 else
-                    $display("  FAIL: recovery frame payload mismatch (got %08h %08h)",
+                    $fatal(1, "  FAIL: recovery frame payload mismatch (got %08h %08h)",
                              rx_payload_buf[0], rx_payload_buf[1]);
             end else
-                $display("  FAIL: recovery frame header mismatch");
+                $fatal(1, "  FAIL: recovery frame header mismatch");
         end else
-            $display("  FAIL: recovery frame not received after half-frame (count=%0d)", received_frame_count[1]);
+            $fatal(1, "  FAIL: recovery frame not received after half-frame (count=%0d)", received_frame_count[1]);
 
         //======================================================================
         // Final

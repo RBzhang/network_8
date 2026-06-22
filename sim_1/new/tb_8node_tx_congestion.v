@@ -553,7 +553,7 @@ module tb_8node_tx_congestion;
         end
         $display("  app_frame_ready[0] = %0d (expect 0 when congested)", app_frame_ready[0]);
         if (app_frame_ready[0])
-            $display("  WARNING: app_frame_ready[0] unexpectedly high");
+            $fatal(1, "  FAIL: app_frame_ready[0]=1 when network_congested=1");
 
         // Spurious-accept check: hold app_frame_valid=1 for 30 cycles.
         // Window is well within the ~130-cycle drain time after send_frame.

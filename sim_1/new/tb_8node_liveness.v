@@ -666,9 +666,7 @@ module tb_8node_liveness;
         if (alive_seen[1][5]) begin
             $display("  PASS: Node5 is seen as alive by Node1 after data packet");
         end else begin
-            // This should not happen if the data packet triggered
-            // liveness_update, but we check gently.
-            $display("  WARNING: Node5 not seen alive by Node1; verify data/forward path");
+            $fatal(1, "  FAIL: Node5 not seen alive by Node1 after data packet — verify data/forward path");
         end
 
         // Also verify that forwarding neighbors see Node5
