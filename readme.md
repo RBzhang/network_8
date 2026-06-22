@@ -1029,6 +1029,127 @@ vvp sim_build/tb_8node_link_fault.vvp
 2. 设置顶层模块为 `tb_8node_link_fault`
 3. Run Behavioral Simulation
 
+### 上层发送接口边界测试 (2026-06-22, iverilog 12.0)
+
+新增独立 testbench `sim_1/new/tb_8node_app_interface.v`，验证 `app_frame_valid/ready/accepted/done`、`app_len_error`、`network_congested` 等上层发送接口在非法输入和边界握手下的行为正确性。测试聚焦 Node0 的 app 接口，使用 8 节点环网拓扑承载正常通信验证。
+
+#### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_app_interface.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 被测模块 | `local_packet_generator.v`（Node0 实例） |
+| 接口参考 | `app_frame_ready = !rst && !tx_congested && !packet_req && !app_payload_busy && (app_len16 <= MAX_PAYLOAD) && (app_len16 > 0)` |
+| 仿真工具 | iverilog 12.0 |
+| 测试日期 | 2026-06-22 |
+
+#### RTL 接口行为
+
+来自 `local_packet_generator.v:33-34`：
+
+```verilog
+assign app_frame_ready = !rst && !tx_congested && !packet_req
+                         && !app_payload_busy
+                         && (app_len16 <= MAX_PAYLOAD) && (app_len16 > 0);
+assign app_len_error   = app_frame_valid && (app_len16 > MAX_PAYLOAD);
+```
+
+接受条件（`local_packet_generator.v:63`）：`app_frame_valid && app_frame_ready` 在同一周期同时为高。接受后置 `packet_req=1` → `app_payload_busy=1` → ready 立即变为 0，阻止连续重复接受。
+
+#### 测试用例
+
+| # | Case | 描述 | 验证点 |
+|---|------|------|--------|
+| 1 | `app_len16 > MAX_PAYLOAD` | 设置 `app_len16=257`，拉高 `app_frame_valid` | `app_frame_ready=0`，`app_len_error=1`，`app_frame_accepted` 不出现，目标节点不收帧 |
+| 2 | `app_frame_valid` 单拍脉冲 + `ready=0` | 用 `app_len16=0`（触发 `app_len16>0` 检查失败）使 `ready=0`，valid 只拉高 1 拍；随后恢复合法 len | 脉冲周期不被 accept；后续合法请求正常被接受并传递，旧请求不重发 |
+| 3 | `app_frame_valid` 长时间保持为 1 | 在 `ready=1` 时保持 valid 连续 150 周期 | 每次 valid&ready 握手接受一个帧（`accepted_count=13`）；`packet_req` 在帧进行期间阻塞 ready，`app_frame_done` 后 ready 恢复可开启下一帧；无 payload 混乱 |
+| 4 | `app_frame_done` 前修改 payload_mem | 接受 len=8 帧后、done 前置前修改 `payload_mem[0][4..7]` 为 `DEAD_BEEF+` | 前半 payload 保持原始值（TX 预读），后半 payload 变为修改值。验证约束：上层必须保持 payload RAM 稳定直到 `app_frame_done`。文档化验证，非 PASS/FAIL |
+| 5 | 正常恢复 | 在所有非法测试后发送正常 Node0→Node4 len=4 | 帧正确投递，payload 正确 |
+
+Case 3 设计说明：`local_packet_generator` 按 valid&ready 逐次握手接受。首次接受后 `packet_req=1` → `app_frame_ready=0`，阻止连续接受。帧完成（`app_frame_done`）后 `app_payload_busy` 清零，若此时 valid 仍为 1 则触发下一次接受。周期约 11-12 拍/帧（150 周期 ÷ 13 次）。
+
+Case 4 观察结果：`payload_mem` 是组合读 RAM（`app_payload_addr` → 组合同步读回 `app_payload_data`）。TX 入队引擎按接收 `packet_accept` 后逐 word 读 payload。若上层在 accept 后修改 RAM，后续读取的 word 将看到修改后的值。前半 word 在修改前已预读，保持原始值。
+
+#### 测试结果
+
+**iverilog 12.0 仿真：ALL APP INTERFACE TESTS PASSED**
+
+```
+============================================================
+ CASE 1: app_len16 > MAX_PAYLOAD (len=257)
+============================================================
+  Cycle 2028: app_len_error[0]=1, app_frame_ready[0]=0, app_frame_accepted[0]=0
+  PASS: Illegal len blocked — ready=0, len_error=1, no accept
+
+============================================================
+ CASE 2: Single-cycle valid pulse while ready=0
+============================================================
+  Phase A: Pulse valid with len=0 (ready forced low by len check)
+    Pulse done at cycle 2040
+    After pulse: app_frame_accepted[0]=0
+  Phase B: Set valid len=4 → should be accepted as a new request
+    Accepted at cycle 2062
+    app_frame_done at cycle 2075
+  OK: Node 4 received frame from Node 0, len=4, payload correct
+  PASS: Single-cycle valid with ready=0 not accepted, old request not re-sent
+
+============================================================
+ CASE 3: app_frame_valid held high for multiple cycles
+============================================================
+  accepted_count during hold = 13
+  PASS: valid held continuously — accepted per handshake cycle, no corruption
+
+============================================================
+ CASE 4: Modify payload_mem after accepted, before done
+============================================================
+  Accepted at cycle 9729
+  Modified payload_mem[0][4..7] after accept
+  app_frame_done at cycle 9746
+  Received payload words:
+    [0] = d0000000        (original)
+    [1] = d0000001
+    [2] = d0000002
+    [3] = d0000003
+    [4] = deadbef3        (modified!)
+    [5] = deadbef4
+    [6] = deadbef5
+    [7] = deadbef6
+  CONCLUSION: payload_mem was modified after accept →
+              modified data was sent for later words.
+              Upper layer MUST keep payload RAM stable
+              between app_frame_accepted and app_frame_done.
+  DONE: Case 4 (documentation, not PASS/FAIL)
+
+============================================================
+ CASE 5: Normal recovery (Node0->Node4, len=4)
+============================================================
+  Frame sent at cycle 11761
+  OK: Node 4 received frame from Node 0, len=4, payload correct
+  PASS: System works normally after illegal-input tests
+
+============================================================
+ ALL APP INTERFACE TESTS PASSED
+============================================================
+$finish called at time : 119585 ns
+```
+
+5 项测试全部通过。`local_packet_generator` 在非法 `app_len16` 时正确压低 `ready` 并置位 `app_len_error`；valid 单拍脉冲在 ready=0 时不产生误接受；valid 长时间保持时按 handshake 节奏逐次接受、无 payload 混乱；accept/done 期间 payload RAM 修改会影响后半 payload（上层必须遵守 stable-until-done 约束）；所有非法测试后系统恢复正常通信。
+
+#### 运行仿真
+
+**iverilog:**
+```powershell
+cd D:\wurenji\network\gtwizard_0_ex.srcs
+iverilog -g2012 -DIVERILOG_SIM -s tb_8node_app_interface -o sim_build/tb_8node_app_interface.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_app_interface.v
+vvp sim_build/tb_8node_app_interface.vvp
+```
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_app_interface.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_app_interface`
+3. Run Behavioral Simulation
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
