@@ -920,6 +920,115 @@ vvp sim_build/tb_8node_liveness.vvp
 2. 设置顶层模块为 `tb_8node_liveness`
 3. Run Behavioral Simulation
 
+### 链路故障与恢复测试 (2026-06-22, iverilog 12.0)
+
+新增独立 testbench `sim_1/new/tb_8node_link_fault.v`，验证环网中光链路临时断开、恢复、传输中断时，系统不会误上报错误帧、不会死锁，并在链路恢复后继续正常通信。通过 `link_enable_cw[i]` / `link_enable_ccw[i]` 门控环形链路 pipeline 的 1 拍寄存器输出，可独立控制任意方向的链路通断。
+
+#### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_link_fault.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 链路控制 | `link_enable_cw[7:0]` / `link_enable_ccw[7:0]` 门控 pipeline 写使能，断开时 data=0/valid=0 |
+| 仿真工具 | iverilog 12.0 |
+| 测试日期 | 2026-06-22 |
+
+#### 环形拓扑与链路使能
+
+```
+node[i].out0 -> pipeline -> node[(i+1)%8].in1   (clockwise,  gated by link_enable_cw[i])
+node[i].out1 -> pipeline -> node[(i+7)%8].in0   (ccw,         gated by link_enable_ccw[i])
+```
+
+断开 `link_enable_cw[i]` 即切断节点 i 顺时针方向输出链路；断开 `link_enable_ccw[i]` 即切断节点 i 逆时针方向输出链路。完全断开相邻两节点之间的双向通信需要同时操作两条使能线。
+
+#### 测试用例
+
+| # | Case | 描述 | 验证点 |
+|---|------|------|--------|
+| 1 | 单方向链路断开 | 断开 Node2→Node3 CW，发送 Node0→Node4 | 帧通过 CCW 路径（0→7→6→5→4）正确到达 |
+| 2a | 双向分区—段内通信 | 断开 2↔3 和 5↔6 双向链路（Segment A: 3-4-5, Segment B: 6-7-0-1-2），测试 Node3→Node5 / Node6→Node0 | 段内节点仍可正常通信，payload 正确 |
+| 2b | 双向分区—跨段阻塞 | 相同分区下，测试 Node3→Node7 / Node0→Node3 | 跨段帧不应到达，不产生死锁或错误 |
+| 3 | 发包过程中断链 | 发送 Node0→Node4 len=256 过程中断开 CW[0]+CW[1]+CCW[0]，完全隔离 Node0 出口 | 无半帧 app_rx 上报，无虚假帧 |
+| 4 | 链路恢复 | 恢复所有 link_enable，重新执行 Node0→4、Node5→1、Node2→广播 | 全部通信恢复正常 |
+
+Case 2 中同时断开两处双向链路创建两个独立分区的设计意图：
+- 双向断开 2↔3（`link_enable_cw[2]=0`, `link_enable_ccw[3]=0`）和 5↔6（`link_enable_cw[5]=0`, `link_enable_ccw[6]=0`）
+- 结果：段 A={3,4,5} 与段 B={6,7,0,1,2} 完全隔离
+- 段内节点通过 CW/CCW 路径仍可达，跨段路径不可达
+
+Case 3 中断链时序：先断开 CW[1]+CCW[0] 切断 Node0→Node4 的 CW 和 CCW 主路径，`send_app_frame_no_wait` 接受 len=256 帧后立即再断开 CW[0] 完全隔离 Node0。`app_frame_done` 仍会正常置位（本地 TX pipeline 不受链路断开影响），但帧不应到达 Node4。
+
+#### 测试结果
+
+**iverilog 12.0 仿真：ALL LINK FAULT TESTS PASSED**
+
+```
+============================================================
+ CASE 1: Single-direction link break (Node2->Node3 CW)
+============================================================
+  Disabled link_enable_cw[2] (Node2->Node3) at cycle 2027
+  OK: Node 4 received frame from Node 0, len=4, payload correct
+  OK: Non-target nodes did not receive unexpected frames
+  PASS: Single-direction break — traffic rerouted via alternate path
+
+============================================================
+ CASE 2: Bidirectional partition (2<->3 and 5<->6)
+============================================================
+  Segment A: Node3-Node4-Node5
+  Segment B: Node6-Node7-Node0-Node1-Node2
+  --- Test 2a: within Segment A, Node3->Node5 ---
+  OK: Node3->Node5 within Segment A works
+  --- Test 2b: within Segment B, Node6->Node0 ---
+  OK: Node6->Node0 within Segment B works
+  --- Test 2c: cross-segment, Node3->Node7 (unreachable) ---
+  OK: Cross-segment frame correctly not delivered
+  --- Test 2d: cross-segment, Node0->Node3 (unreachable) ---
+  OK: Cross-segment frame correctly not delivered
+  PASS: Bidirectional partition — within-segment works, cross-segment blocked, no deadlock
+
+============================================================
+ CASE 3: Mid-transmission link drop (half-frame)
+============================================================
+  Frame accepted at cycle 106521, breaking remaining link now
+  app_frame_done[0] asserted at cycle 106786 (local TX done)
+  PASS: Mid-transmission link drop — no corrupted half-frame delivered
+
+============================================================
+ CASE 4: Link recovery and re-test
+============================================================
+  All links restored at cycle 158786
+  --- Test 4a: Node0->Node4 unicast (len=4) ---
+  OK: Node 4 received frame from Node 0, len=4, payload correct
+  --- Test 4b: Node5->Node1 unicast (len=3) ---
+  OK: Node 1 received frame from Node 5, len=3, payload correct
+  --- Test 4c: Node2->broadcast (len=2) ---
+  OK: Broadcast from Node2 received by all 7 other nodes
+  PASS: All links restored — normal communication resumed
+
+============================================================
+ ALL LINK FAULT TESTS PASSED
+============================================================
+$finish called at time : 1611915 ns
+```
+
+4 项测试全部通过。系统在以下场景均正确工作：单方向链路断开时通过环网另一方向绕行；双向物理分区时段内节点正常通信、跨段帧被正确隔离且不产生死锁；发送过程中链路中断不会产生半帧/错误帧上报；全部链路恢复后网络通信恢复正常。
+
+#### 运行仿真
+
+**iverilog:**
+```powershell
+cd D:\wurenji\network\gtwizard_0_ex.srcs
+iverilog -g2012 -DIVERILOG_SIM -s tb_8node_link_fault -o sim_build/tb_8node_link_fault.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_link_fault.v
+vvp sim_build/tb_8node_link_fault.vvp
+```
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_link_fault.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_link_fault`
+3. Run Behavioral Simulation
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
