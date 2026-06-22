@@ -1248,6 +1248,58 @@ vvp sim_build/tb_8node_dedup_count_wrap.vvp
 2. 设置顶层模块为 `tb_8node_dedup_count_wrap`
 3. Run Behavioral Simulation
 
+### 2026-06-22 测试平台强化与 CDC 链路模型修正
+
+本轮对 4 个已有 testbench 进行严格化改造，将所有非致命 `$display("FAIL"`、`WARNING`、`INFO` 容错路径改为 `$fatal` 或实现严格 PASS。
+
+#### tb_8node_protocol_fault.v — FAIL/TIMEOUT 全部升级为 fatal
+
+- 14 处 `$display("  FAIL:"` → `$fatal(1, "  FAIL:"`
+- 2 处 `$display("  TIMEOUT:"` → `$fatal(1, "  TIMEOUT:"`
+- 所有协议容错子项现在必须严格 PASS，不留任何非致命错误放过路径。
+
+#### tb_8node_liveness.v — Case 4 WARNING 升级为 fatal
+
+- Case 4 中 `alive_seen[1][5]==0` 时原为 `WARNING` 放过 → 改为 `$fatal`
+- 探活心跳刷新验证现在必须严格通过。
+
+#### tb_8node_tx_congestion.v — congested+ready 矛盾检测升级为 fatal
+
+- `network_congested=1` 但 `app_frame_ready=1` 时原为 `WARNING: app_frame_ready unexpectedly high` → 改为 `$fatal`
+- 拥塞/ready 逻辑矛盾现在直接终止仿真，不再放过。
+
+#### tb_8node_async_clock.v — CDC 链路模型修正（源同步恢复时钟）
+
+**问题诊断**：原 Case 2 (diff-freq) 中 Node6→Node7 相邻节点在 Vivado XSim 下失败。初步误判为 async FIFO 不能容忍 97→99 MHz 频率差。
+
+**正确分析**：
+- **不是** async FIFO 频率差能力不足。异步 FIFO 正是为跨不同时钟域设计的，只要写/读速率和 FIFO 深度满足要求，可以跨很大的频率差。
+- **真正原因**：testbench 将 Node6 的 `valid_out/data_out`（`tx_clk` 域）通过组合线直接连接到 Node7 的 `valid_in/data_in`（`rx_clk` 域）。当 `tx_clk` 和 `rx_clk` 真正异频时，接收侧用一个与发送侧无关的异步时钟去采样并行 valid/data 总线，导致漏采、重采、不对齐等问题。
+- async FIFO 不能修复"进入 FIFO 写端之前"的异步并行总线采样问题。如果 `port_cdc` 的 RX FIFO 写端使用 `rx_clk`，则 `valid_in/data_in` 必须已同步于该 `rx_clk`。
+
+**修复方案**：实现源同步/恢复时钟模型。
+
+新增 `derive_rx_clocks_from_tx_links()` 任务：
+```
+// node[j].in1 来自 node[j-1].out0 → rx_clk1[j] = tx_clk0[j-1]
+// node[j].in0 来自 node[j+1].out1 → rx_clk0[j] = tx_clk1[j+1]
+rx1_sel[j] = tx0_sel[(j + NUM_NODES - 1) % NUM_NODES]
+rx0_sel[j] = tx1_sel[(j + 1) % NUM_NODES]
+```
+
+这模拟了真实光链路中 CDR/SerDes 的恢复时钟行为：接收端的 `rx_clk` 由输入数据流恢复而来，因此 `valid_in/data_in` 与 `rx_clk` 同步。
+
+`config_clocks_diff_freq` 和 `config_clocks_per_node` 改为只配置 tx 时钟，rx 由 `derive_rx_clocks_from_tx_links()` 自动派生。
+
+**效果**：Case 2d/2e（Node6→Node7 跨频相邻对，len=4 / len=256）从 INFO 容错改为**严格 PASS**，iverilog 和 Vivado XSim 均验证通过。
+
+**未修改 RTL**：`port_cdc.v`、`async_fifo.v`、`node_core.v` 均未改动。
+
+**关键结论**：
+- async FIFO 没有"只能容忍 X% 频率差"的硬性限制。
+- 并行数据总线跨时钟域时，必须先通过源同步/握手/CDR 使数据同步于目标时钟，再送入 FIFO。
+- 当前 RTL 架构在接收侧 rx_clk 匹配上游 tx_clk 的前提下（即真实 CDR 链路）可正确处理跨频/跨相 CDC。
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
