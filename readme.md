@@ -628,6 +628,90 @@ vvp sim_build/tb_8node_protocol_fault.vvp
 2. 设置顶层模块为 `tb_8node_protocol_fault`
 3. Run Behavioral Simulation
 
+### TX 拥塞与转发丢弃测试 (2026-06-22, Vivado/XSim)
+
+新增独立 testbench `sim_1/new/tb_8node_tx_congestion.v`，验证在 FIFO 队列满、`network_congested` 拉高、`app_frame_ready` 压低、`forward_dropped` 等拥塞场景下，设计不会产生半帧、错帧或死锁。通过调小实例化参数（`FIFO_DEPTH=64`、`RX_REPORT_FIFO_DEPTH=64`、`CLK_FREQ_HZ=5000`、`CONGEST_TIMEOUT_SEC=1`）快速触发拥塞。
+
+#### 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| 测试平台 | `sim_1/new/tb_8node_tx_congestion.v` |
+| 实例化顶层 | `node_top` ×8（`sources_1/new/node_top.v`） |
+| 关键参数 | `FIFO_DEPTH=64`, `RX_REPORT_FIFO_DEPTH=64`, `CLK_FREQ_HZ=5000`, `CONGEST_TIMEOUT_SEC=1` |
+| 拥塞控制 | `link_enable_cw`/`link_enable_ccw` 门控环形链路 pipeline，可独立屏蔽任意方向的输出 |
+| 内部监控 | `g_node[*].u_node.u_node_core.forward_dropped` 层级探测，`spurious_accept_seen` 异常握手检测 |
+| 仿真工具 | Vivado XSim |
+| 测试日期 | 2026-06-22 |
+
+#### 拥塞机制
+
+- 每端口 `tx_frame_fifo` 深度 64，`LEN_LARGE=60` 帧占用 64 entries（`60+4`），填满一个端口队列
+- `tx_enqueue_engine` 在帧写入前通过 `has_frame_room()` 按 `app_len16 + 4` 检查目标端口剩余空间，空间不足的端口跳过
+- `port_tx_queue_sender` 从帧队列以约 1 word/3 cycle 速率搬运到 TX async FIFO，队列自行排空约需 130~190 周期
+- 测试必须在排空窗口内完成探测，因此每个 case 使用紧时序（`send_frame` 返回后立即设置下一个 `app_len16`）
+
+#### 测试用例
+
+| # | Case | 描述 | 验证点 |
+|---|------|------|--------|
+| 1 | 本地发送拥塞 | 屏蔽 Node0 两个方向输出，发送 1 个 len=60 帧填满双端口队列，立即探测 `network_congested[0]` 和 `app_frame_ready[0]` | `network_congested=1` 且 `app_frame_ready=0`；30 周期窗口内无 spurious `app_frame_accepted` |
+| 2 | 小包不被大帧误阻塞 | 仅屏蔽 Node0 CW 方向，发送大帧后等待 CCW 端口排空（250 周期），发送 len=1 小包 | 小包在 CCW 端口有足够空间（5 entries）时仍被接受，不会被 port 0 的满队列误阻塞 |
+| 3 | 转发端口拥塞 | 屏蔽 Node1 两个方向输出，用本地发帧填满其 TX 队列；紧接从 Node0→Node4 发转发帧，经过拥塞的 Node1 | `forward_dropped` 在 Node1 被观测到；队列恢复后重新发送同一帧，Node4 正确接收 |
+| 4 | 拥塞恢复 | 全部链路使能，队列排空后发送普通单播帧 | 网络恢复正常通信，不永久卡死 |
+
+#### 测试结果
+
+**Vivado/XSim 行为仿真：ALL TX CONGESTION TESTS PASSED**
+
+```
+============================================================
+ CASE 1: Local TX congestion (Node0)
+============================================================
+  After queuing: network_congested[0] = 1
+  app_frame_ready[0] = 0 (expect 0 when congested)
+  OK: no spurious accept during congestion window
+
+============================================================
+ CASE 2: Small packet accepted despite one port congested
+============================================================
+  OK: Small packet (len=1) accepted, using non-congested port
+
+============================================================
+ CASE 3: Forward port congestion and forward_dropped
+============================================================
+  OK: forward_dropped observed on Node1 during congestion
+  OK: Forward frame delivered after congestion cleared
+
+============================================================
+ CASE 4: Congestion recovery
+============================================================
+  OK: Node 4 received frame src=0 len=4, payload correct
+  OK: Node 7 received frame src=6 len=2, payload correct
+  OK: Post-congestion unicast works normally
+
+============================================================
+ ALL TX CONGESTION TESTS PASSED
+============================================================
+$finish called at time : 150795 ns
+```
+
+4 项拥塞测试全部通过。设计在队列满时正确压低 `app_frame_ready` 且不产生 spurious accept；小包不会被其他端口满队列误阻塞；转发路径拥塞时正确返回 `forward_dropped` 且不插入转发去重表（拥塞清除后仍可转发）；拥塞恢复后网络通信正常，无死锁。
+
+#### 运行仿真
+
+**Vivado 行为仿真:**
+1. 将 `sim_1/new/tb_8node_tx_congestion.v` 和 `sim/ip_stubs.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_8node_tx_congestion`
+3. Run Behavioral Simulation
+
+**iverilog:**
+```powershell
+cd D:\wurenji\network\gtwizard_0_ex.srcs
+iverilog -g2012 -o sim_build/tb_8node_tx_congestion.vvp sim/ip_stubs.v sources_1/new/*.v sim_1/new/tb_8node_tx_congestion.v
+vvp sim_build/tb_8node_tx_congestion.vvp
+```
+
 ### 修复的 RTL 问题汇总
 
 | # | 问题 | 修复 | 文件 |
