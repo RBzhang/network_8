@@ -29,8 +29,8 @@ module tb_node_top_3port_compile;
     always #5 clk = ~clk;
 
     node_top_3port #(
-        .FIFO_DEPTH(128),
-        .RX_REPORT_FIFO_DEPTH(64),
+        .FIFO_DEPTH(8192),
+        .RX_REPORT_FIFO_DEPTH(2048),
         .CLK_FREQ_HZ(100_000_000),
         .CONGEST_TIMEOUT_SEC(5)
     ) dut (

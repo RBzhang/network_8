@@ -45,6 +45,7 @@ module frame_rx #(
     localparam integer CONGEST_TIMER_W = (CONGEST_TIMEOUT_CYCLES <= 1) ? 1 : $clog2(CONGEST_TIMEOUT_CYCLES + 1);
     reg [CONGEST_TIMER_W-1:0] pause_count;
     wire in_partial_frame = (st != HUNT) && (st != CRC_WAIT) && (st != CHECK) && (st != DONE);
+    wire partial_stall = in_partial_frame && (rx_pause || fifo_empty);
 
     crc32_calc u_crc (
         .clk(clk), .rst(rst),
@@ -65,7 +66,7 @@ module frame_rx #(
             if (frame_ready && frame_consumed) begin
                 frame_ready <= 0; st <= HUNT; wi <= 0;
                 pause_count <= {CONGEST_TIMER_W{1'b0}};
-            end else if (rx_pause && in_partial_frame) begin
+            end else if (partial_stall) begin
                 if (pause_count >= CONGEST_TIMEOUT_CYCLES - 1) begin
                     st <= HUNT;
                     wi <= 0;

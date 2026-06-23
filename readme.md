@@ -1,4 +1,4 @@
-# network_8
+﻿# network_8
 
 基于 FPGA 的环形光互联网络节点原型工程，面向多节点板卡之间的数据转发、广播探活、去重和链路健壮性验证。
 
@@ -1337,6 +1337,65 @@ vvp sim_build\tb_8node_ring.vvp
 2. 设置顶层模块为 `tb_8node_ring`
 3. Run Behavioral Simulation
 4. 在波形中追踪 `u_node[0].u_node_core.g_tx[0].u_port_tx_queue_sender.*` 定位 TX 阻塞点
+
+## 基础通信、初始化、并发、协议异常、反压、拥塞、CDC、liveness、链路异常均已形成较完整 regression，并通过当前仿真验证。
+
+## 多端口 wrapper 与编译验证 (2026-06-23)
+
+### `node_top_3port.v` / `node_top_4port.v` — 多光口板级 wrapper
+
+新增 3 端口和 4 端口板级兼容 wrapper，结构与 `node_top.v`（2 端口）相同，内部分别按 `NUM_PORTS=3/4` 实例化 `node_core`：
+
+- `node_top_3port.v`：展开 `rx_clk[2:0]`、`tx_clk[2:0]`、`in[2:0]`、`out[2:0]`、`valid_in[2:0]`、`valid_out[2:0]` 独立端口
+- `node_top_4port.v`：展开 `rx_clk[3:0]`、`tx_clk[3:0]`、`in[3:0]`、`out[3:0]`、`valid_in[3:0]`、`valid_out[3:0]` 独立端口
+- 新增参数 `TX_QUEUE_TIMEOUT_SEC` / `TX_QUEUE_TIMEOUT_CYCLES`，与 `node_core.v` 保持一致
+
+在 Vivado 工程中需手动通过 Tcl Console 注册：
+```tcl
+add_files -norecurse -fileset sources_1 {D:/wurenji/network/gtwizard_0_ex.srcs/sources_1/new/node_top_3port.v}
+add_files -norecurse -fileset sources_1 {D:/wurenji/network/gtwizard_0_ex.srcs/sources_1/new/node_top_4port.v}
+```
+
+### `tb_node_top_3port_compile.v` / `tb_node_top_4port_compile.v` — 编译验证 testbench
+
+最小化 testbench，仅例化 `node_top_3port` / `node_top_4port` 模块并将所有端口连到常数值或 wire，不做实际数据收发。用于验证：
+
+- 多端口 wrapper 在 Vivado XSim 下能通过编译 → 精化 → 仿真 snapshot 构建
+- 参数传递（`FIFO_DEPTH`、`RX_REPORT_FIFO_DEPTH`、`CLK_FREQ_HZ`、`CONGEST_TIMEOUT_SEC`）正确传播到 `node_core` 及下层模块
+
+关键参数：`FIFO_DEPTH=8192`, `RX_REPORT_FIFO_DEPTH=2048`（与 RTL 默认值一致）。
+
+Vivado 仿真前提：确保 4 个 FIFO IP（`fifo_generator_32_512`、`fifo_generator_sync`、`fifo_generator_meta`、`fifo_generato_txframe`）的输出产品已生成（Generate Output Products）。
+
+### `frame_rx.v` — 新增 `partial_stall` 空闲超时条件
+
+`frame_rx` 拥塞超时检测逻辑从仅检测 `rx_pause` 扩展为检测 `partial_stall = in_partial_frame && (rx_pause || fifo_empty)`：
+
+- **原逻辑**：仅在 `rx_pause` 时启动 `pause_count` 计数器，FIFO 为空但未被暂停时不认为停顿
+- **新逻辑**：`fifo_empty` 也视为停顿条件；FIFO 空且帧处于中间状态（非 `HUNT/CRC_WAIT/CHECK/DONE`）时同样开始计数；数据恢复（非停顿）时清零
+
+影响范围：仅 `frame_rx.v` 第 48 行新增 wire + 第 69 行条件变更。超时阈值仍为 `CONGEST_TIMEOUT_CYCLES = CLK_FREQ_HZ * CONGEST_TIMEOUT_SEC`（默认 5 秒），不受影响。
+
+### `tb_frame_rx_idle_timeout.v` — `frame_rx` 空闲超时 testbench
+
+新增独立 testbench，验证 `frame_rx` 在半帧中断场景下恢复 HUNT 状态的能力：
+
+- **Case 1**：发送完整帧 → 正常接收，验证 baseline 正确
+- **Case 2**：发送半帧（仅 header + 部分 payload）后停止 → 等待 `CONGEST_TIMEOUT_CYCLES+100` 周期 → 验证 `frame_rx.st` 回到 `HUNT` 且无异常 `frame_ready`
+- **Case 3**：半帧恢复后发送完整帧 → 正确接收，验证系统完全恢复
+
+testbench 参数：`CLK_FREQ_HZ=1000, CONGEST_TIMEOUT_SEC=1`（超时 1000 周期），模拟 FIFO（1024 深度），CRC32 计算函数与 RTL 实现等价。
+
+Vivado 运行：
+1. 将 `sim_1/new/tb_frame_rx_idle_timeout.v` 添加为 Simulation Sources
+2. 设置顶层模块为 `tb_frame_rx_idle_timeout`
+3. Run Behavioral Simulation
+
+iverilog 运行：
+```powershell
+iverilog -g2012 -o sim_build/tb_frame_rx_idle_timeout.vvp sim/ip_stubs.v sources_1/new/frame_rx.v sources_1/new/crc32_calc.v sim_1/new/tb_frame_rx_idle_timeout.v
+vvp sim_build/tb_frame_rx_idle_timeout.vvp
+```
 
 ## 详细设计
 
