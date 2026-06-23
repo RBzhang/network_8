@@ -1523,3 +1523,142 @@ Vivado 行为级仿真中所有 5 项测试通过，但末尾出现全节点 `rx
 ```
 
 脚本会在 `main` 分支上完成 `git add`、`git commit` 和 `git push origin main`，因此可以直接把当前改动发布到 GitHub 的 `main`。
+
+## 多端口扩展验证 (2026-06-23, iverilog 12.0)
+
+### 概述
+
+`node_core` 使用 `NUM_PORTS` 参数扩展支持 3 端口和 4 端口。`node_top_3port.v` / `node_top_4port.v` 是板级 wrapper，不破坏原有双端口 `node_top.v`。转发策略仍然是"从某端口收到后，向除接收端口之外的所有端口泛洪转发"。去重表用于抑制重复上报和重复转发。
+
+### 新增文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `sources_1/new/node_top_3port.v` | RTL | 3 端口板级 wrapper |
+| `sources_1/new/node_top_4port.v` | RTL | 4 端口板级 wrapper |
+| `sim_1/new/tb_node_top_3port_compile.v` | Testbench | 3 端口 wrapper 编译验证 |
+| `sim_1/new/tb_node_top_4port_compile.v` | Testbench | 4 端口 wrapper 编译验证 |
+| `sim_1/new/tb_node_core_3port_smoke.v` | Testbench | 3 端口 node_core 基础转发 |
+| `sim_1/new/tb_node_core_4port_smoke.v` | Testbench | 4 端口 node_core 基础转发（已有） |
+| `sim_1/new/tb_node_top_3port_functional.v` | Testbench | 3 端口 wrapper 功能验证 |
+| `sim_1/new/tb_node_top_4port_functional.v` | Testbench | 4 端口 wrapper 功能验证 |
+| `sim_1/new/tb_node_core_4port_dedup.v` | Testbench | 4 端口去重/重复包验证 |
+| `sim_1/new/tb_node_core_4port_concurrent_smoke.v` | Testbench | 4 端口并发注入验证 |
+
+### iverilog 仿真命令
+
+```powershell
+$tmp = "$env:TEMP\kilo"
+$rtl = "sources_1/new/crc32_calc.v sources_1/new/dedup_table.v sources_1/new/async_fifo.v sources_1/new/sync_fifo.v sources_1/new/tx_frame_fifo.v sources_1/new/frame_meta_fifo.v sources_1/new/rx_report_fifo.v sources_1/new/liveness_timer.v sources_1/new/liveness_table.v sources_1/new/node_id_latch.v sources_1/new/frame_rx.v sources_1/new/local_packet_generator.v sources_1/new/forward_engine.v sources_1/new/rx_dispatcher.v sources_1/new/tx_enqueue_engine.v sources_1/new/port_tx_queue_sender.v sources_1/new/port_cdc.v sources_1/new/node_core.v sources_1/new/node_top_3port.v sources_1/new/node_top_4port.v sim/ip_stubs.v"
+
+# Test 1: 3port compile
+iverilog -g2012 -DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO -o "$tmp\tb_node_top_3port_compile.vvp" $rtl sim_1/new/tb_node_top_3port_compile.v
+vvp "$tmp\tb_node_top_3port_compile.vvp"
+
+# Test 2: 4port compile
+iverilog -g2012 -DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO -o "$tmp\tb_node_top_4port_compile.vvp" $rtl sim_1/new/tb_node_top_4port_compile.v
+vvp "$tmp\tb_node_top_4port_compile.vvp"
+
+# Test 3: 3port node_core smoke
+iverilog -g2012 -DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO -o "$tmp\tb_node_core_3port_smoke.vvp" $rtl sim_1/new/tb_node_core_3port_smoke.v
+vvp "$tmp\tb_node_core_3port_smoke.vvp"
+
+# Test 4: 4port node_core smoke
+iverilog -g2012 -DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO -o "$tmp\tb_node_core_4port_smoke.vvp" $rtl sim_1/new/tb_node_core_4port_smoke.v
+vvp "$tmp\tb_node_core_4port_smoke.vvp"
+
+# Test 5: 3port wrapper functional
+iverilog -g2012 -DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO -o "$tmp\tb_node_top_3port_functional.vvp" $rtl sim_1/new/tb_node_top_3port_functional.v
+vvp "$tmp\tb_node_top_3port_functional.vvp"
+
+# Test 6: 4port wrapper functional
+iverilog -g2012 -DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO -o "$tmp\tb_node_top_4port_functional.vvp" $rtl sim_1/new/tb_node_top_4port_functional.v
+vvp "$tmp\tb_node_top_4port_functional.vvp"
+
+# Test 7: 4port dedup
+iverilog -g2012 -DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO -o "$tmp\tb_node_core_4port_dedup.vvp" $rtl sim_1/new/tb_node_core_4port_dedup.v
+vvp "$tmp\tb_node_core_4port_dedup.vvp"
+
+# Test 8: 4port concurrent smoke
+iverilog -g2012 -DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO -o "$tmp\tb_node_core_4port_concurrent_smoke.vvp" $rtl sim_1/new/tb_node_core_4port_concurrent_smoke.v
+vvp "$tmp\tb_node_core_4port_concurrent_smoke.vvp"
+```
+
+### 测试用例与验证点
+
+| # | Testbench | 验证点 |
+|---|-----------|--------|
+| 1 | `tb_node_top_3port_compile` | 3 端口 wrapper 编译通过，参数正确传播 |
+| 2 | `tb_node_top_4port_compile` | 4 端口 wrapper 编译通过，参数正确传播 |
+| 3 | `tb_node_core_3port_smoke` | 3 端口 node_core: port0 本地接收 + port0/port1/port2 转发 mask 正确（泛洪到非接收端口） |
+| 4 | `tb_node_core_4port_smoke` | 4 端口 node_core: port0 本地接收 + port0/port2 转发 mask 正确 |
+| 5 | `tb_node_top_3port_functional` | 3 端口 wrapper 端口打包/解包：in0/in1/in2→out0/out1/out2 直达验证 |
+| 6 | `tb_node_top_4port_functional` | 4 端口 wrapper 端口打包/解包：in0/in1/in2/in3→out0/out1/out2/out3 直达验证 |
+| 7 | `tb_node_core_4port_dedup` | 本地重复上报去重 + 转发重复去重：相同 (src,count) 不重复上报/转发 |
+| 8 | `tb_node_core_4port_concurrent_smoke` | 4 端口并发注入不同 src/count 帧，验证 rx_dispatcher 轮询不卡死 |
+
+### 测试结果 (2026-06-23, iverilog 12.0)
+
+**iverilog 行为仿真：ALL MULTI-PORT TESTS PASSED (8/8)**
+
+```
+=== Test 1: 3port compile ===
+PASS: tb_node_top_3port_compile completed
+
+=== Test 2: 4port compile ===
+PASS: tb_node_top_4port_compile completed
+
+=== Test 3: 3port node_core smoke ===
+CASE 1: port0 inject dst=1 local unicast frame
+  PASS: app_rx received local frame src=9 dst=1 len=1
+CASE 2: port0 inject dst=2 forward frame
+  PASS: valid_out seen on ports 1,2 but not port 0, no app_rx leak
+CASE 3: port1 inject dst=3 forward frame
+  PASS: valid_out seen on ports 0,2 but not port 1, no app_rx leak
+CASE 4: port2 inject dst=4 forward frame
+  PASS: valid_out seen on ports 0,1 but not port 2, no app_rx leak
+PASS: tb_node_core_3port_smoke completed
+
+=== Test 4: 4port node_core smoke ===
+PASS: tb_node_core_4port_smoke completed
+
+=== Test 5: 3port wrapper functional ===
+CASE 1: in0 inject dst=1 local frame via wrapper
+  PASS: app_rx received local frame via wrapper
+CASE 2: in0 inject dst=2 forward frame via wrapper
+  PASS: valid_out on out1/out2, not out0, no app_rx leak
+CASE 3: in1 inject dst=2 forward frame via wrapper
+  PASS: valid_out on out0/out2, not out1, no app_rx leak
+CASE 4: in2 inject dst=2 forward frame via wrapper
+  PASS: valid_out on out0/out1, not out2, no app_rx leak
+PASS: tb_node_top_3port_functional completed
+
+=== Test 6: 4port wrapper functional ===
+CASE 1: in0 inject dst=1 local frame via 4port wrapper
+  PASS: app_rx received local frame via 4port wrapper
+CASE 2: in0 inject dst=2 forward frame via 4port wrapper
+  PASS: valid_out on out1/out2/out3, not out0, no app_rx leak
+CASE 3: in1 inject dst=2 forward frame via 4port wrapper
+  PASS: valid_out on out0/out2/out3, not out1, no app_rx leak
+CASE 4: in2 inject dst=2 forward frame via 4port wrapper
+  PASS: valid_out on out0/out1/out3, not out2, no app_rx leak
+CASE 5: in3 inject dst=2 forward frame via 4port wrapper
+  PASS: valid_out on out0/out1/out2, not out3, no app_rx leak
+PASS: tb_node_top_4port_functional completed
+
+=== Test 7: 4port dedup ===
+CASE 1: Local delivery dedup
+  PASS: duplicate local frame NOT reported to app_rx, count=1
+CASE 2: Forward dedup
+  PASS: duplicate forward frame did NOT produce additional forward output
+PASS: tb_node_core_4port_dedup completed
+
+=== Test 8: 4port concurrent smoke ===
+  PASS: app_rx received 2 local frames (expect >= 2)
+  PASS: valid_out seen for forwarded frames
+PASS: tb_node_core_4port_concurrent_smoke completed
+```
+
+### 说明
+
+以上测试已通过 iverilog 行为级仿真（`-DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO`）。Vivado/XSim 和综合/实现/时序/CDC 检查仍需在 Vivado 工程中继续执行。
