@@ -1662,3 +1662,16 @@ PASS: tb_node_core_4port_concurrent_smoke completed
 ### 说明
 
 以上测试已通过 iverilog 行为级仿真（`-DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO`）。Vivado/XSim 和综合/实现/时序/CDC 检查仍需在 Vivado 工程中继续执行。
+
+### 说明
+
+以上 8 项多端口扩展测试已通过 iverilog 行为级仿真（`-DIVERILOG_SIM -DIVERILOG_BEHAV_FIFO`），并已在 Vivado/XSim 行为级仿真中通过。
+
+Vivado 综合、实现、时序约束检查和 CDC 检查仍需继续执行。重点关注：
+- 3/4 端口扩展后的 LUT/BRAM/FF 资源增长；
+- 多端口 TX FIFO / meta FIFO 的 IP 配置与 data_count 位宽；
+- rx_clk/tx_clk 与 node clk 之间的 CDC 路径；
+- 多端口泛洪转发导致的队列压力和拥塞行为；
+- 上板后光模块 valid/data 对齐和链路恢复。
+
+详细 MAC 顶层接口说明见：[docs/mac_interface.md](docs/mac_interface.md)
